@@ -88,10 +88,12 @@ def get_manga_pages(manga_url):
 # ==========================================
 # FUNCTION 3: Images ko PDF mein convert karna (NAYA KAAM)
 # ==========================================
+# ==========================================
+# FUNCTION 3: Images ko PDF mein convert karna (UPDATED FOR 50MB LIMIT)
+# ==========================================
 def download_and_make_pdf(image_links, title):
     scraper = create_bot_scraper()
     
-    # Title mein se ajeeb characters hatana taaki file save ho sake
     safe_title = "".join([c for c in title if c.isalpha() or c.isdigit() or c==' ']).rstrip()
     pdf_filename = f"{safe_title}.pdf"
     
@@ -100,7 +102,7 @@ def download_and_make_pdf(image_links, title):
         os.makedirs(temp_folder)
         
     downloaded_images = []
-    print(f"\n📥 {len(image_links)} images download karna shuru kar rahe hain...")
+    print(f"\n📥 {len(image_links)} images download kar rahe hain...")
     
     for i, url in enumerate(image_links):
         try:
@@ -110,29 +112,47 @@ def download_and_make_pdf(image_links, title):
                 with open(img_path, 'wb') as f:
                     f.write(response.content)
                 downloaded_images.append(img_path)
-                print(f"✅ Page {i+1} downloaded!")
             else:
-                 print(f"⚠️ Page {i+1} download nahi hua.")
+                 print(f"⚠️ Page {i+1} fail hua.")
         except Exception as e:
-            print(f"❌ Error downloading page {i+1}: {e}")
+            print(f"❌ Error in page {i+1}: {e}")
             
-    # PDF Banana
-    if downloaded_images:
-        print("\n📄 PDF ban raha hai, please wait...")
-        with open(pdf_filename, "wb") as f:
-            f.write(img2pdf.convert(downloaded_images))
-        print(f"🎉 SUCCESS! PDF Ready ho gayi: {pdf_filename}")
+    if not downloaded_images:
+        return []
+
+    print("\n📄 PDF ban rahi hai, size check kar rahe hain...")
+    # Pehle ek single PDF banate hain
+    with open(pdf_filename, "wb") as f:
+        f.write(img2pdf.convert(downloaded_images))
+        
+    # Size Check Karna (MB mein)
+    size_mb = os.path.getsize(pdf_filename) / (1024 * 1024)
+    final_pdfs = []
+    
+    if size_mb > 48.0:
+        print(f"⚠️ PDF bohot badi hai ({size_mb:.2f} MB). 2 Parts mein tod rahe hain...")
+        os.remove(pdf_filename) # Badi file uda do
+        
+        mid_index = len(downloaded_images) // 2
+        part1_name = f"{safe_title} - Part 1.pdf"
+        part2_name = f"{safe_title} - Part 2.pdf"
+        
+        with open(part1_name, "wb") as f:
+            f.write(img2pdf.convert(downloaded_images[:mid_index]))
+        with open(part2_name, "wb") as f:
+            f.write(img2pdf.convert(downloaded_images[mid_index:]))
+            
+        final_pdfs = [part1_name, part2_name]
     else:
-        print("❌ Koi image download nahi hui, PDF nahi ban sakti.")
-        return None
+        print(f"✅ PDF Size safe hai: {size_mb:.2f} MB")
+        final_pdfs = [pdf_filename]
     
     # Kachra saaf karna
-    print("🧹 Temporary images saaf kar rahe hain...")
     for img in downloaded_images:
         os.remove(img)
     os.rmdir(temp_folder)
     
-    return pdf_filename
+    return final_pdfs # Ab yeh list return karega
 
 # ==========================================
 # TEST KARNE KE LIYE (Ab teeno step ek saath chalenge)
@@ -156,4 +176,5 @@ if __name__ == "__main__":
         else:
             print("❌ Pages nahi mile.")
     else:
+
         print("❌ Kuch nahi mila!")
