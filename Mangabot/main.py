@@ -1,7 +1,7 @@
 import os
 import threading
 import asyncio
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from flask import Flask
 
 from scraper import get_manga_list, get_manga_pages, download_and_make_pdf
@@ -17,7 +17,9 @@ def home():
     return "Manga Bot is Alive and Running! 🚀"
 
 def run_server():
-    web_app.run(host="0.0.0.0", port=8080)
+    # Render jo port dega hum wo use karenge, taaki crash na ho
+    port = int(os.environ.get("PORT", 8080))
+    web_app.run(host="0.0.0.0", port=port)
 
 # Auto-post variables
 auto_post_active = False
@@ -106,7 +108,6 @@ async def auto_post_task():
         if auto_post_active and auto_post_tags:
             print(f"🔄 Auto-Post Check chal raha hai for tags: {auto_post_tags}")
             
-            # Har check par bas top 2 latest manga dekhenge
             manga_list = get_manga_list(auto_post_tags, limit=2)
             history = load_history()
             
@@ -118,10 +119,8 @@ async def auto_post_task():
                     if pages:
                         pdf_file = download_and_make_pdf(pages, manga['title'])
                         if pdf_file and os.path.exists(pdf_file):
-                            # Channel ID ya apni Chat ID yahan set hogi (abhi apni khud ki chat me aayega)
-                            # Jab channel me bhejna ho, toh 'me' ki jagah Channel Username daalna (e.g., "@mychannel")
                             await app.send_document(
-                                chat_id="me", 
+                                chat_id="me", # Khud ko bhejega, channel ke liye yahan ID dalna
                                 document=pdf_file,
                                 caption=f"🔥 **New Update**\n**{manga['title']}**\n🎯 **Tags:** {', '.join(auto_post_tags)}"
                             )
@@ -129,7 +128,6 @@ async def auto_post_task():
                             save_history(manga['link'])
                             print("✅ Uploaded & Saved to history.")
                             
-                    # Ek manga upload karne ke baad loop ko thoda saans lene do (10 sec)
                     await asyncio.sleep(10) 
         
         # Har 30 minutes (1800 seconds) me website check karega
@@ -155,15 +153,25 @@ async def stop_auto(client, message):
     await message.reply_text("🛑 Auto-Post band kar diya gaya hai.")
 
 # ==========================================
-# RUN EVERYTHING
+# RUN EVERYTHING (Fix for 24/7 & Listening)
 # ==========================================
+async def start_bot():
+    print("🚀 Telegram se connect kar raha hu...")
+    await app.start()
+    print("✅ Bot is ONLINE aur messages sun raha hai!")
+    
+    # Auto-post wale task ko background me chala do
+    asyncio.create_task(auto_post_task())
+    
+    # Bot ko jagaye rakho taaki wo sun sake
+    await idle()
+    await app.stop()
+
 if __name__ == "__main__":
-    server_thread = threading.Thread(target=run_server)
+    # Web server ko background thread me chalne do
+    server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
     
-    print("🚀 Bot start ho raha hai...")
-    
-    # Auto-post background task ko start karna
-    app.start()
-    asyncio.get_event_loop().create_task(auto_post_task())
-    app.loop.run_forever()
+    # Bot ka main engine start karo
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(start_bot())
