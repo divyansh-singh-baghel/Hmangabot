@@ -17,35 +17,50 @@ def home():
     return "Manga Bot is Alive and Running! 🚀"
 
 def run_server():
-    # Render jo port dega hum wo use karenge, taaki crash na ho
     port = int(os.environ.get("PORT", 8080))
     web_app.run(host="0.0.0.0", port=port)
 
-# Auto-post variables
+# Auto-post & Database variables
 auto_post_active = False
 auto_post_tags = []
-HISTORY_FILE = "history.txt"
-
-# History File Logic
-def load_history():
-    if not os.path.exists(HISTORY_FILE):
-        return []
-    with open(HISTORY_FILE, "r") as f:
-        return f.read().splitlines()
-
-def save_history(link):
-    with open(HISTORY_FILE, "a") as f:
-        f.write(link + "\n")
+DATABASE_CHANNEL = int(os.environ.get("DATABASE_CHANNEL", "0"))
+scraped_history = set() # Bot ki memory
 
 # ==========================================
-# 2. TELEGRAM BOT SETUP
+# 2. TELEGRAM DATABASE LOGIC (Option 1 Hack)
+# ==========================================
+async def load_database():
+    print("📥 Telegram Channel se purani history load kar raha hu...")
+    if DATABASE_CHANNEL == 0:
+        print("⚠️ WARNING: DATABASE_CHANNEL ID set nahi hai Render mein!")
+        return
+        
+    try:
+        # Channel ke saare purane messages (links) padh kar memory me daal lo
+        async for msg in app.get_chat_history(DATABASE_CHANNEL):
+            if msg.text:
+                scraped_history.add(msg.text.strip())
+        print(f"✅ Database Loaded! Total {len(scraped_history)} manga pehle se saved hain.")
+    except Exception as e:
+        print(f"❌ Database load karne me error: {e}. Kya bot channel me admin hai?")
+
+async def save_to_database(link):
+    scraped_history.add(link) # Memory me save karo
+    if DATABASE_CHANNEL != 0:
+        try:
+            await app.send_message(DATABASE_CHANNEL, link) # Channel me backup bhej do
+        except Exception as e:
+            print(f"❌ Database channel me link save nahi ho paya: {e}")
+
+# ==========================================
+# 3. TELEGRAM BOT SETUP
 # ==========================================
 app = Client("manga_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_command(client, message):
     text = (
-        "🤖 **Manga Bot Ready!**\n\n"
+        "🤖 **Premium Manga Bot Ready!**\n\n"
         "🛠 **Commands:**\n"
         "1. `/getmanga <limit> <tags>` - Manual download\n"
         "2. `/autoon <tags>` - Auto-post shuru karein\n"
@@ -54,7 +69,7 @@ async def start_command(client, message):
     await message.reply_text(text)
 
 # ==========================================
-# 3. MANUAL DOWNLOAD LOGIC
+# 4. MANUAL DOWNLOAD LOGIC
 # ==========================================
 @app.on_message(filters.command("getmanga") & filters.private)
 async def fetch_manga(client, message):
@@ -80,26 +95,41 @@ async def fetch_manga(client, message):
     await status_msg.edit_text(f"✅ {len(manga_list)} manga mili. Processing...")
 
     for manga in manga_list:
+        # --- SMART FILTER 1: AI GENERATED CHECK ---
+        title_lower = manga['title'].lower()
+        if " ai " in f" {title_lower} " or "[ai]" in title_lower or "(ai)" in title_lower or "ai generated" in title_lower:
+            await message.reply_text(f"🤖 Skipped AI Manga: {manga['title']}")
+            continue
+
         pages = get_manga_pages(manga['link'])
-        if not pages: continue
+        
+        # --- SMART FILTER 2: PAGE COUNT CHECK ---
+        if not pages or len(pages) < 7:
+            await message.reply_text(f"📉 Skipped (Kam pages hain): {manga['title']}")
+            continue
             
         await status_msg.edit_text(f"📥 **{manga['title']}**\nPDF ban rahi hai...")
-        pdf_file = download_and_make_pdf(pages, manga['title'])
         
-        if pdf_file and os.path.exists(pdf_file):
+        # Splitter logic support (ab yeh list aayegi)
+        pdf_files = download_and_make_pdf(pages, manga['title'])
+        
+        if pdf_files:
             await status_msg.edit_text(f"📤 Uploading **{manga['title']}**...")
-            await client.send_document(
-                chat_id=message.chat.id, 
-                document=pdf_file, 
-                caption=f"**{manga['title']}**\n🎯 **Tags:** {', '.join(tags)}\n🔗 **Link:** {manga['link']}"
-            )
-            os.remove(pdf_file)
-            save_history(manga['link']) # Manual me bhi history save kar lo
+            for pdf_file in pdf_files:
+                if os.path.exists(pdf_file):
+                    await client.send_document(
+                        chat_id=message.chat.id, 
+                        document=pdf_file, 
+                        caption=f"🔥 **{manga['title']}**\n🎯 **Tags:** {', '.join(tags)}"
+                    )
+                    os.remove(pdf_file) # Upload hote hi delete
+                    
+            await save_to_database(manga['link'])
 
     await status_msg.edit_text("✅ Manual Task Complete!")
 
 # ==========================================
-# 4. AUTO-POST LOGIC
+# 5. AUTO-POST LOGIC
 # ==========================================
 async def auto_post_task():
     global auto_post_active, auto_post_tags
@@ -107,41 +137,53 @@ async def auto_post_task():
     while True:
         if auto_post_active and auto_post_tags:
             print(f"🔄 Auto-Post Check chal raha hai for tags: {auto_post_tags}")
-            
-            manga_list = get_manga_list(auto_post_tags, limit=2)
-            history = load_history()
+            manga_list = get_manga_list(auto_post_tags, limit=3)
             
             for manga in manga_list:
-                if manga['link'] not in history:
-                    print(f"🆕 Nayi Manga Mili: {manga['title']}")
-                    
+                # --- SMART FILTER 1: AI GENERATED CHECK ---
+                title_lower = manga['title'].lower()
+                if " ai " in f" {title_lower} " or "[ai]" in title_lower or "(ai)" in title_lower or "ai generated" in title_lower:
+                    print(f"🤖 AI Manga Skipped: {manga['title']}")
+                    continue
+
+                # --- DATABASE CHECK ---
+                if manga['link'] not in scraped_history:
                     pages = get_manga_pages(manga['link'])
-                    if pages:
-                        pdf_file = download_and_make_pdf(pages, manga['title'])
-                        if pdf_file and os.path.exists(pdf_file):
-                            await app.send_document(
-                                chat_id="me", # Khud ko bhejega, channel ke liye yahan ID dalna
-                                document=pdf_file,
-                                caption=f"🔥 **New Update**\n**{manga['title']}**\n🎯 **Tags:** {', '.join(auto_post_tags)}"
-                            )
-                            os.remove(pdf_file)
-                            save_history(manga['link'])
-                            print("✅ Uploaded & Saved to history.")
+                    
+                    # --- SMART FILTER 2: PAGE COUNT CHECK ---
+                    if not pages or len(pages) < 7:
+                        print(f"📉 Skipped (Kam pages hain): {manga['title']}")
+                        # Kachra manga ko bhi database me daal do taaki baar baar check na kare
+                        await save_to_database(manga['link'])
+                        continue
+                        
+                    print(f"🆕 Nayi Manga Mili: {manga['title']}")
+                    pdf_files = download_and_make_pdf(pages, manga['title'])
+                    
+                    if pdf_files:
+                        for pdf_file in pdf_files:
+                            if os.path.exists(pdf_file):
+                                await app.send_document(
+                                    chat_id="me", # TODO: Jab main channel banega, yahan us channel ka ID aayega
+                                    document=pdf_file,
+                                    caption=f"🔥 **New Update**\n**{manga['title']}**\n🎯 **Tags:** {', '.join(auto_post_tags)}"
+                                )
+                                os.remove(pdf_file)
+                                
+                        await save_to_database(manga['link'])
+                        print("✅ Uploaded & Saved to Telegram Database.")
                             
-                    await asyncio.sleep(10) 
+                    await asyncio.sleep(15) 
         
-        # Har 30 minutes (1800 seconds) me website check karega
         await asyncio.sleep(1800) 
 
 @app.on_message(filters.command("autoon") & filters.private)
 async def start_auto(client, message):
     global auto_post_active, auto_post_tags
     args = message.text.split()
-    
     if len(args) < 2:
         await message.reply_text("❌ Tags batao. Format: `/autoon color english`")
         return
-        
     auto_post_tags = args[1:]
     auto_post_active = True
     await message.reply_text(f"✅ Auto-Post ON ho gaya hai! Tags: {', '.join(auto_post_tags)}\nHar 30 minute me check karunga.")
@@ -153,25 +195,22 @@ async def stop_auto(client, message):
     await message.reply_text("🛑 Auto-Post band kar diya gaya hai.")
 
 # ==========================================
-# RUN EVERYTHING (Fix for 24/7 & Listening)
+# RUN EVERYTHING
 # ==========================================
 async def start_bot():
     print("🚀 Telegram se connect kar raha hu...")
     await app.start()
-    print("✅ Bot is ONLINE aur messages sun raha hai!")
+    print("✅ Bot is ONLINE!")
     
-    # Auto-post wale task ko background me chala do
+    # Bot start hote hi sabse pehle database load karega
+    await load_database()
+    
     asyncio.create_task(auto_post_task())
-    
-    # Bot ko jagaye rakho taaki wo sun sake
     await idle()
     await app.stop()
 
 if __name__ == "__main__":
-    # Web server ko background thread me chalne do
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
-    
-    # Bot ka main engine start karo
     loop = asyncio.get_event_loop()
     loop.run_until_complete(start_bot())
