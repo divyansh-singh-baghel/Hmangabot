@@ -1,0 +1,6 @@
+pyrogram
+tgcrypto
+beautifulsoup4
+cloudscraper
+Flask
+img2pdf
