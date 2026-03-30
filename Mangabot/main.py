@@ -22,7 +22,6 @@ def run_server():
     port = int(os.environ.get("PORT", 8080))
     web_app.run(host="0.0.0.0", port=port)
 
-# Auto-post & Database variables
 auto_post_active = False
 auto_post_tags = []
 DATABASE_CHANNEL = int(os.environ.get("DATABASE_CHANNEL", "0"))
@@ -30,21 +29,22 @@ scraped_history = set()
 
 # Premium FSub Variables
 FSUB_CHANNEL = os.environ.get("FSUB_CHANNEL", "") 
-START_IMAGE = "https://i.pinimg.com/originals/82/4c/75/824c75d5d8baddac1e3ab99a48b77f36.jpg"
+# YAHAN APNI IMAGE KA LINK DAAL DENA
+START_IMAGE = "https://i.postimg.cc/mZh4Hpxb/ayaka.jpg" 
 
 # ==========================================
 # 2. TELEGRAM DATABASE LOGIC
 # ==========================================
 async def load_database():
-    print("📥 Telegram Channel se purani history load kar raha hu...")
+    print("📥 Loading history from Telegram Database Channel...")
     if DATABASE_CHANNEL == 0:
-        print("⚠️ WARNING: DATABASE_CHANNEL ID set nahi hai!")
+        print("⚠️ WARNING: DATABASE_CHANNEL ID is not set!")
         return
     try:
         async for msg in app.get_chat_history(DATABASE_CHANNEL):
             if msg.text:
                 scraped_history.add(msg.text.strip())
-        print(f"✅ Database Loaded! Total {len(scraped_history)} manga saved hain.")
+        print(f"✅ Database Loaded! Total {len(scraped_history)} items saved.")
     except Exception as e:
         print(f"❌ Database load error: {e}")
 
@@ -53,7 +53,7 @@ async def save_to_database(link):
     if DATABASE_CHANNEL != 0:
         try:
             await app.send_message(DATABASE_CHANNEL, link)
-        except Exception as e:
+        except Exception:
             pass
 
 # ==========================================
@@ -76,14 +76,13 @@ async def check_fsub(client, message):
             "Access to this bot is limited to subscribed members only.\n\n"
             "Please join the listed channel to activate your access."
         )
-        # Button banana
         channel_link = f"https://t.me/{FSUB_CHANNEL.replace('@', '')}"
         join_btn = InlineKeyboardMarkup([[InlineKeyboardButton("📢 Join Channel To Use Bot", url=channel_link)]])
         
         await message.reply_photo(photo=START_IMAGE, caption=fsub_text, reply_markup=join_btn)
         return False
     except Exception as e:
-        print(f"FSub Error (Bot admin nahi hoga): {e}")
+        print(f"FSub Error: {e}")
         return True
 
 @app.on_message(filters.command("start") & filters.private)
@@ -92,11 +91,11 @@ async def start_command(client, message):
 
     welcome_text = (
         f"🤖 **Welcome {message.from_user.first_name}!**\n\n"
-        "Tumhara Premium Access verified hai. ✅\n\n"
-        "Manga mangwane ke liye command use karo:\n"
+        "Your Premium Access is verified. ✅\n\n"
+        "To download a manga, use the following command structure:\n"
         "`/getmanga <limit> <tags>`\n"
         "**Example:** `/getmanga 1 color`\n\n"
-        "Baaki details ke liye `/help` type karo."
+        "Type `/help` for a detailed guide on how to use all commands."
     )
     await message.reply_photo(photo=START_IMAGE, caption=welcome_text)
 
@@ -105,20 +104,24 @@ async def help_command(client, message):
     if not await check_fsub(client, message): return
     
     help_text = (
-        "🛠 **Manga Bot - Help Menu** 🛠\n\n"
-        "🔍 **1. Search & Download:**\n"
-        "`/getmanga <limit> <tags>`\n"
-        "*(Yeh command tags ke hisaab se PDF bhej dega)*\n\n"
-        "🤖 **2. Auto-Post System:**\n"
-        "`/autoon <tags>`\n"
-        "*(Bot har 30 min me check karega)*\n\n"
-        "🛑 **3. Stop Auto-Post:**\n"
-        "`/autooff`\n"
+        "🛠 **Manga Bot - Premium Help Menu** 🛠\n\n"
+        "**1. Manual Search & Download**\n"
+        "Format: `/getmanga <limit> <tags>`\n"
+        "• `<limit>`: The number of results you want (e.g., 1, 3, 5)\n"
+        "• `<tags>`: The keywords or name of the manga.\n"
+        "💡 *Example:* `/getmanga 2 naruto doujin` (Downloads 2 Naruto doujins)\n\n"
+        "**2. Automated Posting (Admin Only)**\n"
+        "Format: `/autoon <tags>`\n"
+        "• Starts checking the site every 30 minutes for the given tags.\n"
+        "💡 *Example:* `/autoon color english`\n\n"
+        "**3. Stop Automated Posting**\n"
+        "Format: `/autooff`\n"
+        "• Stops the background scanning process completely."
     )
     await message.reply_text(help_text)
 
 # ==========================================
-# 4. MANUAL DOWNLOAD LOGIC (With Buttons)
+# 4. MANUAL DOWNLOAD LOGIC (With ETA)
 # ==========================================
 @app.on_message(filters.command("getmanga") & filters.private)
 async def fetch_manga(client, message):
@@ -126,44 +129,52 @@ async def fetch_manga(client, message):
 
     args = message.text.split()
     if len(args) < 3:
-        await message.reply_text("❌ Format: `/getmanga 1 color english`")
+        await message.reply_text("❌ **Invalid Format!**\nPlease use: `/getmanga <limit> <tags>`\n*Example:* `/getmanga 1 color english`")
         return
     
     try:
         limit = int(args[1])
         tags = args[2:]
     except ValueError:
-        await message.reply_text("❌ Limit number hona chahiye.")
+        await message.reply_text("❌ The `<limit>` must be a valid number (e.g., 1, 2, 5).")
         return
 
-    status_msg = await message.reply_text(f"🔍 Searching {limit} manga...")
+    status_msg = await message.reply_text(f"🔍 Searching for **{limit}** manga with tags: `{', '.join(tags)}`...")
     manga_list = get_manga_list(tags, limit)
     
     if not manga_list:
-        await status_msg.edit_text("❌ Kuch nahi mila.")
+        await status_msg.edit_text("❌ No results found for the given tags. Try different keywords.")
         return
 
-    await status_msg.edit_text(f"✅ {len(manga_list)} manga mili. Processing...")
+    await status_msg.edit_text(f"✅ Found **{len(manga_list)}** manga. Initiating processing sequence...")
 
     for manga in manga_list:
         title_lower = manga['title'].lower()
         if " ai " in f" {title_lower} " or "[ai]" in title_lower or "(ai)" in title_lower or "ai generated" in title_lower:
-            await message.reply_text(f"🤖 Skipped AI Manga: {manga['title']}")
+            await message.reply_text(f"🤖 **Skipped AI Manga:** {manga['title']}")
             continue
 
         pages = get_manga_pages(manga['link'])
         
         if not pages or len(pages) < 7:
-            await message.reply_text(f"📉 Skipped (Kam pages hain): {manga['title']}")
+            await message.reply_text(f"📉 **Skipped:** {manga['title']} (Contains less than 7 pages)")
             continue
             
-        await status_msg.edit_text(f"📥 **{manga['title']}**\nPDF ban rahi hai...")
+        # Calculation for Estimated Time (Assuming ~0.8 seconds per page download)
+        eta_seconds = int(len(pages) * 0.8)
+        
+        await status_msg.edit_text(
+            f"📥 **{manga['title']}**\n\n"
+            f"📄 **Total Pages:** {len(pages)}\n"
+            f"⏳ **Estimated Time:** ~{eta_seconds} seconds\n\n"
+            f"*(Downloading images and generating PDF. Please wait...)*"
+        )
+        
         pdf_files = download_and_make_pdf(pages, manga['title'])
         
         if pdf_files:
-            await status_msg.edit_text(f"📤 Uploading **{manga['title']}**...")
+            await status_msg.edit_text(f"📤 **{manga['title']}** processed. Uploading to Telegram...")
             
-            # Premium Channel Button
             channel_link = f"https://t.me/{FSUB_CHANNEL.replace('@', '')}" if FSUB_CHANNEL else "https://t.me/telegram"
             post_buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔥 Join Our Channel", url=channel_link)]])
 
@@ -179,10 +190,10 @@ async def fetch_manga(client, message):
                     
             await save_to_database(manga['link'])
 
-    await status_msg.edit_text("✅ Task Complete!")
+    await status_msg.edit_text("✅ Download task completed successfully!")
 
 # ==========================================
-# 5. AUTO-POST LOGIC (Shortened for display, but fully functional)
+# 5. AUTO-POST LOGIC
 # ==========================================
 async def auto_post_task():
     global auto_post_active, auto_post_tags
@@ -223,24 +234,24 @@ async def start_auto(client, message):
     global auto_post_active, auto_post_tags
     args = message.text.split()
     if len(args) < 2:
-        await message.reply_text("❌ Format: `/autoon color english`")
+        await message.reply_text("❌ **Format Error:** `/autoon <tags>`")
         return
     auto_post_tags = args[1:]
     auto_post_active = True
-    await message.reply_text(f"✅ Auto-Post ON! Tags: {', '.join(auto_post_tags)}")
+    await message.reply_text(f"✅ **Auto-Post Enabled!**\nScanning for tags: `{', '.join(auto_post_tags)}`")
 
 @app.on_message(filters.command("autooff") & filters.private)
 async def stop_auto(client, message):
     if not await check_fsub(client, message): return
     global auto_post_active
     auto_post_active = False
-    await message.reply_text("🛑 Auto-Post band!")
+    await message.reply_text("🛑 **Auto-Post Terminated.**")
 
 # ==========================================
 # RUN EVERYTHING
 # ==========================================
 async def start_bot():
-    print("🚀 Telegram se connect kar raha hu...")
+    print("🚀 Connecting to Telegram Servers...")
     await app.start()
     print("✅ Bot is ONLINE!")
     await load_database()
