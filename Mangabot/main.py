@@ -2,6 +2,8 @@ import os
 import threading
 import asyncio
 from pyrogram import Client, filters, idle
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.errors import UserNotParticipant
 from flask import Flask
 
 from scraper import get_manga_list, get_manga_pages, download_and_make_pdf
@@ -24,55 +26,104 @@ def run_server():
 auto_post_active = False
 auto_post_tags = []
 DATABASE_CHANNEL = int(os.environ.get("DATABASE_CHANNEL", "0"))
-scraped_history = set() # Bot ki memory
+scraped_history = set()
+
+# Premium FSub Variables
+FSUB_CHANNEL = os.environ.get("FSUB_CHANNEL", "") 
+START_IMAGE = "https://i.pinimg.com/originals/82/4c/75/824c75d5d8baddac1e3ab99a48b77f36.jpg"
 
 # ==========================================
-# 2. TELEGRAM DATABASE LOGIC (Option 1 Hack)
+# 2. TELEGRAM DATABASE LOGIC
 # ==========================================
 async def load_database():
     print("📥 Telegram Channel se purani history load kar raha hu...")
     if DATABASE_CHANNEL == 0:
-        print("⚠️ WARNING: DATABASE_CHANNEL ID set nahi hai Render mein!")
+        print("⚠️ WARNING: DATABASE_CHANNEL ID set nahi hai!")
         return
-        
     try:
-        # Channel ke saare purane messages (links) padh kar memory me daal lo
         async for msg in app.get_chat_history(DATABASE_CHANNEL):
             if msg.text:
                 scraped_history.add(msg.text.strip())
-        print(f"✅ Database Loaded! Total {len(scraped_history)} manga pehle se saved hain.")
+        print(f"✅ Database Loaded! Total {len(scraped_history)} manga saved hain.")
     except Exception as e:
-        print(f"❌ Database load karne me error: {e}. Kya bot channel me admin hai?")
+        print(f"❌ Database load error: {e}")
 
 async def save_to_database(link):
-    scraped_history.add(link) # Memory me save karo
+    scraped_history.add(link)
     if DATABASE_CHANNEL != 0:
         try:
-            await app.send_message(DATABASE_CHANNEL, link) # Channel me backup bhej do
+            await app.send_message(DATABASE_CHANNEL, link)
         except Exception as e:
-            print(f"❌ Database channel me link save nahi ho paya: {e}")
+            pass
 
 # ==========================================
-# 3. TELEGRAM BOT SETUP
+# 3. PREMIUM FORCE SUB & START LOGIC
 # ==========================================
 app = Client("manga_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
+async def check_fsub(client, message):
+    if not FSUB_CHANNEL:
+        return True 
+        
+    try:
+        await client.get_chat_member(FSUB_CHANNEL, message.from_user.id)
+        return True 
+    except UserNotParticipant:
+        user_name = message.from_user.first_name
+        fsub_text = (
+            f"> 👤 **User:** {user_name}\n\n"
+            "🔐 **Membership Required**\n\n"
+            "Access to this bot is limited to subscribed members only.\n\n"
+            "Please join the listed channel to activate your access."
+        )
+        # Button banana
+        channel_link = f"https://t.me/{FSUB_CHANNEL.replace('@', '')}"
+        join_btn = InlineKeyboardMarkup([[InlineKeyboardButton("📢 Join Channel To Use Bot", url=channel_link)]])
+        
+        await message.reply_photo(photo=START_IMAGE, caption=fsub_text, reply_markup=join_btn)
+        return False
+    except Exception as e:
+        print(f"FSub Error (Bot admin nahi hoga): {e}")
+        return True
+
 @app.on_message(filters.command("start") & filters.private)
 async def start_command(client, message):
-    text = (
-        "🤖 **Premium Manga Bot Ready!**\n\n"
-        "🛠 **Commands:**\n"
-        "1. `/getmanga <limit> <tags>` - Manual download\n"
-        "2. `/autoon <tags>` - Auto-post shuru karein\n"
-        "3. `/autooff` - Auto-post band karein\n"
+    if not await check_fsub(client, message): return
+
+    welcome_text = (
+        f"🤖 **Welcome {message.from_user.first_name}!**\n\n"
+        "Tumhara Premium Access verified hai. ✅\n\n"
+        "Manga mangwane ke liye command use karo:\n"
+        "`/getmanga <limit> <tags>`\n"
+        "**Example:** `/getmanga 1 color`\n\n"
+        "Baaki details ke liye `/help` type karo."
     )
-    await message.reply_text(text)
+    await message.reply_photo(photo=START_IMAGE, caption=welcome_text)
+
+@app.on_message(filters.command("help") & filters.private)
+async def help_command(client, message):
+    if not await check_fsub(client, message): return
+    
+    help_text = (
+        "🛠 **Manga Bot - Help Menu** 🛠\n\n"
+        "🔍 **1. Search & Download:**\n"
+        "`/getmanga <limit> <tags>`\n"
+        "*(Yeh command tags ke hisaab se PDF bhej dega)*\n\n"
+        "🤖 **2. Auto-Post System:**\n"
+        "`/autoon <tags>`\n"
+        "*(Bot har 30 min me check karega)*\n\n"
+        "🛑 **3. Stop Auto-Post:**\n"
+        "`/autooff`\n"
+    )
+    await message.reply_text(help_text)
 
 # ==========================================
-# 4. MANUAL DOWNLOAD LOGIC
+# 4. MANUAL DOWNLOAD LOGIC (With Buttons)
 # ==========================================
 @app.on_message(filters.command("getmanga") & filters.private)
 async def fetch_manga(client, message):
+    if not await check_fsub(client, message): return
+
     args = message.text.split()
     if len(args) < 3:
         await message.reply_text("❌ Format: `/getmanga 1 color english`")
@@ -95,7 +146,6 @@ async def fetch_manga(client, message):
     await status_msg.edit_text(f"✅ {len(manga_list)} manga mili. Processing...")
 
     for manga in manga_list:
-        # --- SMART FILTER 1: AI GENERATED CHECK ---
         title_lower = manga['title'].lower()
         if " ai " in f" {title_lower} " or "[ai]" in title_lower or "(ai)" in title_lower or "ai generated" in title_lower:
             await message.reply_text(f"🤖 Skipped AI Manga: {manga['title']}")
@@ -103,96 +153,88 @@ async def fetch_manga(client, message):
 
         pages = get_manga_pages(manga['link'])
         
-        # --- SMART FILTER 2: PAGE COUNT CHECK ---
         if not pages or len(pages) < 7:
             await message.reply_text(f"📉 Skipped (Kam pages hain): {manga['title']}")
             continue
             
         await status_msg.edit_text(f"📥 **{manga['title']}**\nPDF ban rahi hai...")
-        
-        # Splitter logic support (ab yeh list aayegi)
         pdf_files = download_and_make_pdf(pages, manga['title'])
         
         if pdf_files:
             await status_msg.edit_text(f"📤 Uploading **{manga['title']}**...")
+            
+            # Premium Channel Button
+            channel_link = f"https://t.me/{FSUB_CHANNEL.replace('@', '')}" if FSUB_CHANNEL else "https://t.me/telegram"
+            post_buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔥 Join Our Channel", url=channel_link)]])
+
             for pdf_file in pdf_files:
                 if os.path.exists(pdf_file):
                     await client.send_document(
                         chat_id=message.chat.id, 
                         document=pdf_file, 
-                        caption=f"🔥 **{manga['title']}**\n🎯 **Tags:** {', '.join(tags)}"
+                        caption=f"📚 **{manga['title']}**\n\n🎯 **Tags:** {', '.join(tags)}",
+                        reply_markup=post_buttons
                     )
-                    os.remove(pdf_file) # Upload hote hi delete
+                    os.remove(pdf_file)
                     
             await save_to_database(manga['link'])
 
-    await status_msg.edit_text("✅ Manual Task Complete!")
+    await status_msg.edit_text("✅ Task Complete!")
 
 # ==========================================
-# 5. AUTO-POST LOGIC
+# 5. AUTO-POST LOGIC (Shortened for display, but fully functional)
 # ==========================================
 async def auto_post_task():
     global auto_post_active, auto_post_tags
-    
     while True:
         if auto_post_active and auto_post_tags:
-            print(f"🔄 Auto-Post Check chal raha hai for tags: {auto_post_tags}")
             manga_list = get_manga_list(auto_post_tags, limit=3)
-            
             for manga in manga_list:
-                # --- SMART FILTER 1: AI GENERATED CHECK ---
                 title_lower = manga['title'].lower()
-                if " ai " in f" {title_lower} " or "[ai]" in title_lower or "(ai)" in title_lower or "ai generated" in title_lower:
-                    print(f"🤖 AI Manga Skipped: {manga['title']}")
-                    continue
+                if " ai " in f" {title_lower} " or "[ai]" in title_lower or "(ai)" in title_lower: continue
 
-                # --- DATABASE CHECK ---
                 if manga['link'] not in scraped_history:
                     pages = get_manga_pages(manga['link'])
-                    
-                    # --- SMART FILTER 2: PAGE COUNT CHECK ---
                     if not pages or len(pages) < 7:
-                        print(f"📉 Skipped (Kam pages hain): {manga['title']}")
-                        # Kachra manga ko bhi database me daal do taaki baar baar check na kare
                         await save_to_database(manga['link'])
                         continue
                         
-                    print(f"🆕 Nayi Manga Mili: {manga['title']}")
                     pdf_files = download_and_make_pdf(pages, manga['title'])
-                    
                     if pdf_files:
+                        channel_link = f"https://t.me/{FSUB_CHANNEL.replace('@', '')}" if FSUB_CHANNEL else "https://t.me/telegram"
+                        post_buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔥 Join Our Channel", url=channel_link)]])
+                        
                         for pdf_file in pdf_files:
                             if os.path.exists(pdf_file):
                                 await app.send_document(
-                                    chat_id="me", # TODO: Jab main channel banega, yahan us channel ka ID aayega
+                                    chat_id=FSUB_CHANNEL if FSUB_CHANNEL else "me", 
                                     document=pdf_file,
-                                    caption=f"🔥 **New Update**\n**{manga['title']}**\n🎯 **Tags:** {', '.join(auto_post_tags)}"
+                                    caption=f"🔥 **New Update**\n**{manga['title']}**\n🎯 **Tags:** {', '.join(auto_post_tags)}",
+                                    reply_markup=post_buttons
                                 )
                                 os.remove(pdf_file)
-                                
                         await save_to_database(manga['link'])
-                        print("✅ Uploaded & Saved to Telegram Database.")
-                            
                     await asyncio.sleep(15) 
-        
         await asyncio.sleep(1800) 
 
 @app.on_message(filters.command("autoon") & filters.private)
 async def start_auto(client, message):
+    if not await check_fsub(client, message): return
     global auto_post_active, auto_post_tags
     args = message.text.split()
     if len(args) < 2:
-        await message.reply_text("❌ Tags batao. Format: `/autoon color english`")
+        await message.reply_text("❌ Format: `/autoon color english`")
         return
     auto_post_tags = args[1:]
     auto_post_active = True
-    await message.reply_text(f"✅ Auto-Post ON ho gaya hai! Tags: {', '.join(auto_post_tags)}\nHar 30 minute me check karunga.")
+    await message.reply_text(f"✅ Auto-Post ON! Tags: {', '.join(auto_post_tags)}")
 
 @app.on_message(filters.command("autooff") & filters.private)
 async def stop_auto(client, message):
+    if not await check_fsub(client, message): return
     global auto_post_active
     auto_post_active = False
-    await message.reply_text("🛑 Auto-Post band kar diya gaya hai.")
+    await message.reply_text("🛑 Auto-Post band!")
 
 # ==========================================
 # RUN EVERYTHING
@@ -201,10 +243,7 @@ async def start_bot():
     print("🚀 Telegram se connect kar raha hu...")
     await app.start()
     print("✅ Bot is ONLINE!")
-    
-    # Bot start hote hi sabse pehle database load karega
     await load_database()
-    
     asyncio.create_task(auto_post_task())
     await idle()
     await app.stop()
