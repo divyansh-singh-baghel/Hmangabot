@@ -45,7 +45,7 @@ AWAITING_IMAGE = set()
 app = Client("manga_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # ==========================================
-# 2. UPGRADED DATABASE & LINKS CACHE
+# 2. UPGRADED DATABASE & LINKS CACHE (Peer ID Fixed)
 # ==========================================
 async def update_dynamic_links():
     global BOT_USERNAME, FSUB_LINK
@@ -63,10 +63,20 @@ async def load_database():
     if DATABASE_CHANNEL == 0:
         print("⚠️ WARNING: DATABASE_CHANNEL ID is missing!")
         return
+        
+    try:
+        # 💡 PEER ID FIX: Wake up the channel to force Telegram to cache it
+        wake_msg = await app.send_message(DATABASE_CHANNEL, "🔄 Database Syncing...")
+        await asyncio.sleep(1)
+        await wake_msg.delete()
+    except Exception as e:
+        print(f"⚠️ Could not wake DB Channel (Make sure bot is admin): {e}")
+
     try:
         async for msg in app.get_chat_history(DATABASE_CHANNEL):
-            if msg.text:
-                text = msg.text.strip()
+            text = msg.text or msg.caption
+            if text:
+                text = text.strip()
                 if text.startswith("ADMIN:"): ADMINS.add(int(text.split(":")[1]))
                 elif text.startswith("DELADMIN:"):
                     aid = int(text.split(":")[1])
@@ -81,12 +91,13 @@ async def load_database():
                 elif text.startswith("AUTOPOST:"):
                     AUTO_POST_CHANNEL = text.split(":", 1)[1]
                     if AUTO_POST_CHANNEL == "NONE": AUTO_POST_CHANNEL = ""
-                else:
+                elif text.startswith("http"): 
+                    # Sirf actual links ko memory me daalo taaki repeat na ho
                     scraped_history.add(text) 
+                    
         print(f"✅ DB Loaded: {len(scraped_history)} Manga | {len(USERS)} Users")
     except Exception as e:
         print(f"⚠️ Peer ID Invalid or DB Error: {e}")
-        print("💡 FIX: Go to your Database Channel and send the message '/ping' to cache it!")
 
 async def save_to_db(data_string):
     if DATABASE_CHANNEL != 0:
@@ -207,7 +218,45 @@ async def handle_photo(client, message):
 @app.on_message(filters.command("stats") & filters.private)
 async def cmd_stats(client, message):
     if not is_admin(message.from_user.id): return
-    await message.reply_text(f"📊 **Bot Stats**\n👥 Users: `{len(USERS)}` | 📚 Manga: `{len(scraped_history)}`")
+    stats_text = (
+        "📊 **Bot Statistics** 📊\n\n"
+        f"👥 **Unique Users:** `{len(USERS)}`\n"
+        f"📚 **Manga Processed:** `{len(scraped_history)}`\n"
+        f"👑 **Admins:** `{len(ADMINS)} (+Owner)`\n\n"
+        f"🔐 **FSub Channel:** `{FSUB_CHANNEL if FSUB_CHANNEL else 'Not Set'}`\n"
+        f"📢 **Post Channel:** `{AUTO_POST_CHANNEL if AUTO_POST_CHANNEL else 'DM Only'}`"
+    )
+    await message.reply_text(stats_text)
+
+@app.on_message(filters.command("addadmin") & filters.private)
+async def cmd_addadmin(client, message):
+    if message.from_user.id != OWNER_ID: return
+    try:
+        new_admin = int(message.text.split()[1])
+        if new_admin in ADMINS: return await message.reply_text("⚠️ Already an admin.")
+        ADMINS.add(new_admin)
+        await save_to_db(f"ADMIN:{new_admin}")
+        await message.reply_text(f"✅ User `{new_admin}` is now an Admin!")
+    except: await message.reply_text("❌ **Format:** `/addadmin <User_ID>`")
+
+@app.on_message(filters.command("deladmin") & filters.private)
+async def cmd_deladmin(client, message):
+    if message.from_user.id != OWNER_ID: return
+    try:
+        del_admin = int(message.text.split()[1])
+        if del_admin in ADMINS:
+            ADMINS.remove(del_admin)
+            await save_to_db(f"DELADMIN:{del_admin}")
+            await message.reply_text(f"🗑️ Admin `{del_admin}` removed.")
+    except: await message.reply_text("❌ **Format:** `/deladmin <User_ID>`")
+
+@app.on_message(filters.command("adminlist") & filters.private)
+async def cmd_adminlist(client, message):
+    if not is_admin(message.from_user.id): return
+    text = f"👑 **Owner ID:** `{OWNER_ID}`\n\n🛡️ **Admins:**\n"
+    for a in ADMINS: text += f"• `{a}`\n"
+    if not ADMINS: text += "• No extra admins."
+    await message.reply_text(text)
 
 @app.on_callback_query()
 async def handle_callback(client, message: CallbackQuery):
@@ -242,7 +291,6 @@ async def start_command(client, message):
             await message.reply_text("📥 **Fetching your Manga securely... Please wait.**")
             for db_msg_id in db_ids:
                 try:
-                    # Chupchaap DB channel se file user ko copy karke bhej do
                     await app.copy_message(
                         chat_id=message.chat.id, 
                         from_chat_id=DATABASE_CHANNEL, 
@@ -250,9 +298,8 @@ async def start_command(client, message):
                     )
                 except Exception as e:
                     print(f"Deep link fetch error: {e}")
-            return # Yahan function rok do taaki intro message na bheje
+            return 
             
-    # Normal Intro Message
     welcome_text = (
         f"🤖 **Welcome to the Premium Manga Bot, {message.from_user.first_name}!**\n\n"
         "I am an advanced, high-speed automated bot designed to search, compile, and deliver high-quality manga directly to you in PDF format.\n\n"
@@ -274,7 +321,6 @@ async def help_command(client, message):
 # 6. DOWNLOAD & POST BUILDER LOGIC
 # ==========================================
 async def build_and_send_premium_post(title, tags, pages_count, cover_url, pdf_files, target_chat):
-    # 1. Sabse pehle PDF ko DB channel me bhejo aur Message ID nikalo
     db_msg_ids = []
     for pdf_file in pdf_files:
         if os.path.exists(pdf_file):
@@ -284,14 +330,12 @@ async def build_and_send_premium_post(title, tags, pages_count, cover_url, pdf_f
                 caption=f"📚 **{title}**"
             )
             db_msg_ids.append(str(db_msg.id))
-            os.remove(pdf_file) # PC se delete kar do
+            os.remove(pdf_file)
 
-    # 2. Agar PDFs successfully DB me chali gayi, toh Deep Link banao
     if db_msg_ids:
         dl_param = "dl_" + "-".join(db_msg_ids)
         download_link = f"https://t.me/{BOT_USERNAME}?start={dl_param}"
         
-        # 3. Premium Buttons (Download + Channel Join)
         post_buttons = InlineKeyboardMarkup([
             [InlineKeyboardButton("📥 Download Manga (PDF)", url=download_link)],
             [InlineKeyboardButton("🔥 Join Our Channel", url=FSUB_LINK)]
@@ -304,7 +348,6 @@ async def build_and_send_premium_post(title, tags, pages_count, cover_url, pdf_f
             f"⚡ **Generated by @DSB_07's Bot**"
         )
         
-        # 4. Target chat me final Cover + Details + Button post kar do
         try:
             await app.send_photo(
                 chat_id=target_chat,
@@ -330,22 +373,26 @@ async def fetch_manga(client, message):
     await status_msg.edit_text(f"✅ Found **{len(manga_list)}** manga. Processing...")
 
     for manga in manga_list:
-        if " ai " in manga['title'].lower() or "[ai]" in manga['title'].lower(): continue
-        
-        pages, cover_url = get_manga_pages(manga['link'])
-        if not pages or len(pages) < 7: continue
+        try:
+            if " ai " in manga['title'].lower() or "[ai]" in manga['title'].lower(): continue
             
-        eta_seconds = int(len(pages) * 0.8)
-        await status_msg.edit_text(f"📥 **{manga['title']}**\n📄 Pages: {len(pages)} | ⏳ ETA: ~{eta_seconds}s")
-        
-        pdf_files = download_and_make_pdf(pages, manga['title'])
-        if pdf_files:
-            target_chat = AUTO_POST_CHANNEL if AUTO_POST_CHANNEL else message.chat.id
-            # Send through our new Deep Link Builder
-            await build_and_send_premium_post(manga['title'], tags, len(pages), cover_url, pdf_files, target_chat)
+            pages, cover_url = get_manga_pages(manga['link'])
+            if not pages or len(pages) < 7: continue
+                
+            eta_seconds = int(len(pages) * 0.8)
+            await status_msg.edit_text(f"📥 **{manga['title']}**\n📄 Pages: {len(pages)} | ⏳ ETA: ~{eta_seconds}s")
             
-            scraped_history.add(manga['link'])
-            await save_to_db(manga['link'])
+            pdf_files = download_and_make_pdf(pages, manga['title'])
+            if pdf_files:
+                target_chat = AUTO_POST_CHANNEL if AUTO_POST_CHANNEL else message.chat.id
+                await build_and_send_premium_post(manga['title'], tags, len(pages), cover_url, pdf_files, target_chat)
+                
+                scraped_history.add(manga['link'])
+                await save_to_db(manga['link']) # Ye line link ko database me text banake save karti hai
+        except Exception as e:
+            print(f"Crash Guard Protected Bot: {e}")
+            continue
+            
     await status_msg.edit_text("✅ Task completed!")
 
 # ==========================================
@@ -357,23 +404,26 @@ async def auto_post_task():
         if auto_post_active and auto_post_tags:
             manga_list = get_manga_list(auto_post_tags, limit=3)
             for manga in manga_list:
-                if " ai " in manga['title'].lower() or "[ai]" in manga['title'].lower(): continue
-                if manga['link'] not in scraped_history:
-                    pages, cover_url = get_manga_pages(manga['link'])
-                    if not pages or len(pages) < 7:
-                        scraped_history.add(manga['link'])
-                        await save_to_db(manga['link'])
-                        continue
-                        
-                    pdf_files = download_and_make_pdf(pages, manga['title'])
-                    if pdf_files:
-                        target_chat = AUTO_POST_CHANNEL if AUTO_POST_CHANNEL else "me"
-                        # Use the exact same Deep Link Builder
-                        await build_and_send_premium_post(manga['title'], auto_post_tags, len(pages), cover_url, pdf_files, target_chat)
-                        
-                        scraped_history.add(manga['link'])
-                        await save_to_db(manga['link'])
-                    await asyncio.sleep(15) 
+                try:
+                    if " ai " in manga['title'].lower() or "[ai]" in manga['title'].lower(): continue
+                    if manga['link'] not in scraped_history:
+                        pages, cover_url = get_manga_pages(manga['link'])
+                        if not pages or len(pages) < 7:
+                            scraped_history.add(manga['link'])
+                            await save_to_db(manga['link'])
+                            continue
+                            
+                        pdf_files = download_and_make_pdf(pages, manga['title'])
+                        if pdf_files:
+                            target_chat = AUTO_POST_CHANNEL if AUTO_POST_CHANNEL else "me"
+                            await build_and_send_premium_post(manga['title'], auto_post_tags, len(pages), cover_url, pdf_files, target_chat)
+                            
+                            scraped_history.add(manga['link'])
+                            await save_to_db(manga['link'])
+                except Exception as e:
+                    print(f"Auto-post error skipped: {e}")
+                    continue
+                await asyncio.sleep(15) 
         await asyncio.sleep(1800) 
 
 @app.on_message(filters.command("autoon") & filters.private)
@@ -400,7 +450,7 @@ async def start_bot():
     print("🚀 Connecting to Telegram Servers...")
     await app.start()
     print("✅ Bot is ONLINE!")
-    await update_dynamic_links() # Fetches Bot username & Fsub Link
+    await update_dynamic_links() 
     await load_database()
     asyncio.create_task(auto_post_task())
     await idle()
