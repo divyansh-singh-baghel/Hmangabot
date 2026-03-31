@@ -32,15 +32,31 @@ FSUB_CHANNEL = os.environ.get("FSUB_CHANNEL", "")
 AUTO_POST_CHANNEL = "" 
 START_IMAGE = "https://i.postimg.cc/mZh4Hpxb/ayaka.jpg" 
 
+# Deep Link Variables
+BOT_USERNAME = ""
+FSUB_LINK = "https://t.me/telegram"
+
 # Memory Arrays
 scraped_history = set()
 USERS = set()
 ADMINS = set()
 AWAITING_IMAGE = set()
 
+app = Client("manga_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
 # ==========================================
-# 2. UPGRADED TELEGRAM DATABASE LOGIC
+# 2. UPGRADED DATABASE & LINKS CACHE
 # ==========================================
+async def update_dynamic_links():
+    global BOT_USERNAME, FSUB_LINK
+    me = await app.get_me()
+    BOT_USERNAME = me.username
+    if FSUB_CHANNEL:
+        try:
+            FSUB_LINK = await app.export_chat_invite_link(FSUB_CHANNEL)
+        except Exception:
+            FSUB_LINK = f"https://t.me/{str(FSUB_CHANNEL).replace('@', '')}"
+
 async def load_database():
     global START_IMAGE, FSUB_CHANNEL, AUTO_POST_CHANNEL
     print("📥 Loading Data from Database Channel...")
@@ -67,10 +83,10 @@ async def load_database():
                     if AUTO_POST_CHANNEL == "NONE": AUTO_POST_CHANNEL = ""
                 else:
                     scraped_history.add(text) 
-                    
-        print(f"✅ DB Loaded: {len(scraped_history)} Manga | {len(USERS)} Users | {len(ADMINS)} Admins")
+        print(f"✅ DB Loaded: {len(scraped_history)} Manga | {len(USERS)} Users")
     except Exception as e:
-        print(f"❌ Database load error: {e}")
+        print(f"⚠️ Peer ID Invalid or DB Error: {e}")
+        print("💡 FIX: Go to your Database Channel and send the message '/ping' to cache it!")
 
 async def save_to_db(data_string):
     if DATABASE_CHANNEL != 0:
@@ -80,23 +96,15 @@ async def save_to_db(data_string):
 # ==========================================
 # 3. SECURITY: ADMIN & FSUB CHECKS
 # ==========================================
-app = Client("manga_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
 MAIN_HELP_TEXT = (
     "🛠 **Manga Bot - Help Menu** 🛠\n\n"
     "**1. Manual Search & Download**\n"
-    "Format: `/getmanga <limit> <tags>`\n"
-    "• `<limit>`: Number of results (e.g., 1, 3)\n"
-    "• `<tags>`: Keywords of the manga.\n"
+    "`/getmanga <limit> <tags>`\n"
     "💡 *Example:* `/getmanga 2 naruto doujin`\n\n"
     "**2. Automated Posting (Admin Only)**\n"
-    "Format: `/autoon <tags>`\n"
-    "• Starts checking the site every 30 mins.\n"
-    "💡 *Example:* `/autoon color english`\n\n"
-    "**3. Stop Automated Posting**\n"
-    "Format: `/autooff`\n\n"
+    "`/autoon <tags>` | `/autooff`\n\n"
     "⚙️ **Admin Controls:**\n"
-    "`/setimage` - Change start picture (Send photo)\n"
+    "`/setimage` - Change start picture\n"
     "`/setfsub @channel` - Force Subscribe setup\n"
     "`/setautopost @channel` - Redirect downloads\n"
     "`/stats` - View users & bot data\n"
@@ -113,7 +121,7 @@ async def check_fsub_and_admin(client, message, strict_admin=True):
         await save_to_db(f"USER:{user_id}")
         
     if strict_admin and not is_admin(user_id):
-        await message.reply_text("⛔ **Access Denied:**\n\nThis is a private bot. Only authorized Admins can use it.")
+        await message.reply_text("⛔ **Access Denied:** Private Bot.")
         return False
         
     if not FSUB_CHANNEL: return True 
@@ -121,27 +129,22 @@ async def check_fsub_and_admin(client, message, strict_admin=True):
         await client.get_chat_member(FSUB_CHANNEL, user_id)
         return True 
     except UserNotParticipant:
-        user_name = message.from_user.first_name
         fsub_text = (
-            f"> 👤 **User:** {user_name}\n\n"
+            f"> 👤 **User:** {message.from_user.first_name}\n\n"
             "🔐 **Membership Required**\n\n"
             "Please join the listed channel to activate your access."
         )
-        
-        link = f"https://t.me/{FSUB_CHANNEL.replace('@', '')}" if not str(FSUB_CHANNEL).startswith("-100") else "https://t.me/telegram"
         fsub_buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📢 Join Channel To Use Bot", url=link)],
+            [InlineKeyboardButton("📢 Join Channel To Use Bot", url=FSUB_LINK)],
             [InlineKeyboardButton("♻️ Try Again", callback_data="check_start")]
         ])
-        
         try:
             if START_IMAGE: await message.reply_photo(photo=START_IMAGE, caption=fsub_text, reply_markup=fsub_buttons)
             else: await message.reply_text(text=fsub_text, reply_markup=fsub_buttons)
         except:
             await message.reply_text(text=fsub_text, reply_markup=fsub_buttons)
         return False
-    except Exception:
-        return True
+    except Exception: return True
 
 # ==========================================
 # 4. ADMIN & CALLBACK HANDLERS
@@ -151,32 +154,23 @@ async def cmd_setfsub(client, message):
     global FSUB_CHANNEL
     if not is_admin(message.from_user.id): return
     args = message.text.split()
-    if len(args) < 2: return await message.reply_text("❌ **Format:** `/setfsub @YourChannel`")
+    if len(args) < 2: return await message.reply_text("❌ Format: `/setfsub @YourChannel`")
     val = args[1]
-    if val.lower() == "none":
-        FSUB_CHANNEL = ""
-        await save_to_db("FSUB:NONE")
-        await message.reply_text("✅ Force Subscribe removed.")
-    else:
-        FSUB_CHANNEL = val
-        await save_to_db(f"FSUB:{val}")
-        await message.reply_text(f"✅ FSub set to: **{val}**")
+    FSUB_CHANNEL = "" if val.lower() == "none" else val
+    await save_to_db(f"FSUB:{'NONE' if val.lower() == 'none' else val}")
+    await update_dynamic_links()
+    await message.reply_text(f"✅ FSub updated.")
 
 @app.on_message(filters.command("setautopost") & filters.private)
 async def cmd_setautopost(client, message):
     global AUTO_POST_CHANNEL
     if not is_admin(message.from_user.id): return
     args = message.text.split()
-    if len(args) < 2: return await message.reply_text("❌ **Format:** `/setautopost @YourChannel`")
+    if len(args) < 2: return await message.reply_text("❌ Format: `/setautopost @YourChannel`")
     val = args[1]
-    if val.lower() == "none":
-        AUTO_POST_CHANNEL = ""
-        await save_to_db("AUTOPOST:NONE")
-        await message.reply_text("✅ Auto-Post channel removed. DMs enabled.")
-    else:
-        AUTO_POST_CHANNEL = val
-        await save_to_db(f"AUTOPOST:{val}")
-        await message.reply_text(f"✅ Downloads redirected to: **{val}**")
+    AUTO_POST_CHANNEL = "" if val.lower() == "none" else val
+    await save_to_db(f"AUTOPOST:{'NONE' if val.lower() == 'none' else val}")
+    await message.reply_text(f"✅ Auto-post target updated.")
 
 @app.on_message(filters.command("setimage") & filters.private)
 async def cmd_setimage(client, message):
@@ -203,29 +197,16 @@ async def handle_photo(client, message):
 @app.on_message(filters.command("stats") & filters.private)
 async def cmd_stats(client, message):
     if not is_admin(message.from_user.id): return
-    stats_text = (
-        "📊 **Bot Statistics**\n\n"
-        f"👥 **Users:** `{len(USERS)}` | 📚 **Manga:** `{len(scraped_history)}`\n"
-        f"👑 **Admins:** `{len(ADMINS)} (+Owner)`\n"
-        f"🔐 **FSub:** `{FSUB_CHANNEL if FSUB_CHANNEL else 'None'}`\n"
-        f"📢 **Post:** `{AUTO_POST_CHANNEL if AUTO_POST_CHANNEL else 'DM'}`"
-    )
-    await message.reply_text(stats_text)
-
-# (Add/Del/List Admin commands omitted for length, let me know if you need them, but they work identical to previous!)
+    await message.reply_text(f"📊 **Bot Stats**\n👥 Users: `{len(USERS)}` | 📚 Manga: `{len(scraped_history)}`")
 
 @app.on_callback_query()
 async def handle_callback(client, message: CallbackQuery):
-    data = message.data
-    user_id = message.from_user.id
-    
-    if data == "show_help":
+    if message.data == "show_help":
         await message.message.reply_text(MAIN_HELP_TEXT)
         await message.answer("✅ Help Menu Opened")
-        
-    elif data == "check_start":
+    elif message.data == "check_start":
         try:
-            await client.get_chat_member(FSUB_CHANNEL, user_id)
+            await client.get_chat_member(FSUB_CHANNEL, message.from_user.id)
             await message.message.delete()
             from pyrogram.types import Message
             fake_msg = Message(chat=message.message.chat, from_user=message.from_user, text="/start", client=client)
@@ -234,14 +215,34 @@ async def handle_callback(client, message: CallbackQuery):
         except UserNotParticipant:
             await message.answer("❌ Join the channel first!", show_alert=True)
         except Exception:
-            await message.answer("❌ Bot error.")
+            await message.answer("❌ Error.")
 
 # ==========================================
-# 5. CORE COMMANDS & PREMIUM POST LOGIC
+# 5. START & DEEP LINK DOWNLOAD HANDLER
 # ==========================================
 @app.on_message(filters.command("start") & filters.private)
 async def start_command(client, message):
     if not await check_fsub_and_admin(client, message, strict_admin=False): return
+    
+    # --- DEEP LINKING MAGIC LOGIC ---
+    if len(message.command) > 1:
+        arg = message.command[1]
+        if arg.startswith("dl_"):
+            db_ids = arg.replace("dl_", "").split("-")
+            await message.reply_text("📥 **Fetching your Manga securely... Please wait.**")
+            for db_msg_id in db_ids:
+                try:
+                    # Chupchaap DB channel se file user ko copy karke bhej do
+                    await app.copy_message(
+                        chat_id=message.chat.id, 
+                        from_chat_id=DATABASE_CHANNEL, 
+                        message_id=int(db_msg_id)
+                    )
+                except Exception as e:
+                    print(f"Deep link fetch error: {e}")
+            return # Yahan function rok do taaki intro message na bheje
+            
+    # Normal Intro Message
     welcome_text = (
         f"🤖 **Welcome to the Premium Manga Bot, {message.from_user.first_name}!**\n\n"
         "I am an advanced, high-speed automated bot designed to search, compile, and deliver high-quality manga directly to you in PDF format.\n\n"
@@ -258,6 +259,51 @@ async def start_command(client, message):
 async def help_command(client, message):
     if not await check_fsub_and_admin(client, message): return
     await message.reply_text(MAIN_HELP_TEXT)
+
+# ==========================================
+# 6. DOWNLOAD & POST BUILDER LOGIC
+# ==========================================
+async def build_and_send_premium_post(title, tags, pages_count, cover_url, pdf_files, target_chat):
+    # 1. Sabse pehle PDF ko DB channel me bhejo aur Message ID nikalo
+    db_msg_ids = []
+    for pdf_file in pdf_files:
+        if os.path.exists(pdf_file):
+            db_msg = await app.send_document(
+                chat_id=DATABASE_CHANNEL,
+                document=pdf_file,
+                caption=f"📚 **{title}**"
+            )
+            db_msg_ids.append(str(db_msg.id))
+            os.remove(pdf_file) # PC se delete kar do
+
+    # 2. Agar PDFs successfully DB me chali gayi, toh Deep Link banao
+    if db_msg_ids:
+        dl_param = "dl_" + "-".join(db_msg_ids)
+        download_link = f"https://t.me/{BOT_USERNAME}?start={dl_param}"
+        
+        # 3. Premium Buttons (Download + Channel Join)
+        post_buttons = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📥 Download Manga (PDF)", url=download_link)],
+            [InlineKeyboardButton("🔥 Join Our Channel", url=FSUB_LINK)]
+        ])
+        
+        post_caption = (
+            f"📖 **Name:** `{title}`\n\n"
+            f"🏷 **Tags:** `{', '.join(tags)}`\n"
+            f"📄 **Pages:** `{pages_count}`\n\n"
+            f"⚡ **Generated by @DSB_07's Bot**"
+        )
+        
+        # 4. Target chat me final Cover + Details + Button post kar do
+        try:
+            await app.send_photo(
+                chat_id=target_chat,
+                photo=cover_url if cover_url else START_IMAGE,
+                caption=post_caption,
+                reply_markup=post_buttons
+            )
+        except Exception as e:
+            print(f"Post error: {e}")
 
 @app.on_message(filters.command("getmanga") & filters.private)
 async def fetch_manga(client, message):
@@ -276,7 +322,6 @@ async def fetch_manga(client, message):
     for manga in manga_list:
         if " ai " in manga['title'].lower() or "[ai]" in manga['title'].lower(): continue
         
-        # NAYA: Extract pages AND cover image
         pages, cover_url = get_manga_pages(manga['link'])
         if not pages or len(pages) < 7: continue
             
@@ -285,46 +330,16 @@ async def fetch_manga(client, message):
         
         pdf_files = download_and_make_pdf(pages, manga['title'])
         if pdf_files:
-            btn_link = f"https://t.me/{FSUB_CHANNEL.replace('@', '')}" if FSUB_CHANNEL and not str(FSUB_CHANNEL).startswith("-100") else "https://t.me/telegram"
-            post_buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔥 Join Our Channel", url=btn_link)]])
-            
             target_chat = AUTO_POST_CHANNEL if AUTO_POST_CHANNEL else message.chat.id
+            # Send through our new Deep Link Builder
+            await build_and_send_premium_post(manga['title'], tags, len(pages), cover_url, pdf_files, target_chat)
             
-            # PREMIUM POST LAYOUT
-            post_caption = (
-                f"📖 **Name:** `{manga['title']}`\n\n"
-                f"🏷 **Tags:** `{', '.join(tags)}`\n"
-                f"📄 **Pages:** `{len(pages)}`\n\n"
-                f"⚡ **Generated by @DSB_07's Bot**"
-            )
-            
-            try:
-                # 1. Pehle Cover Image bhejte hain
-                post_msg = await client.send_photo(
-                    chat_id=target_chat,
-                    photo=cover_url if cover_url else START_IMAGE,
-                    caption=post_caption,
-                    reply_markup=post_buttons
-                )
-                
-                # 2. Phir PDF ko as a Reply bhejte hain
-                for pdf_file in pdf_files:
-                    if os.path.exists(pdf_file):
-                        await client.send_document(
-                            chat_id=target_chat, 
-                            document=pdf_file,
-                            reply_to_message_id=post_msg.id
-                        )
-                        os.remove(pdf_file)
-            except Exception as e:
-                print(f"Upload error: {e}")
-                
             scraped_history.add(manga['link'])
             await save_to_db(manga['link'])
     await status_msg.edit_text("✅ Task completed!")
 
 # ==========================================
-# 6. AUTO-POST LOGIC (Threaded Post Updates)
+# 7. AUTO-POST LOGIC
 # ==========================================
 async def auto_post_task():
     global auto_post_active, auto_post_tags
@@ -334,7 +349,6 @@ async def auto_post_task():
             for manga in manga_list:
                 if " ai " in manga['title'].lower() or "[ai]" in manga['title'].lower(): continue
                 if manga['link'] not in scraped_history:
-                    # NAYA: Extract pages AND cover image
                     pages, cover_url = get_manga_pages(manga['link'])
                     if not pages or len(pages) < 7:
                         scraped_history.add(manga['link'])
@@ -343,41 +357,10 @@ async def auto_post_task():
                         
                     pdf_files = download_and_make_pdf(pages, manga['title'])
                     if pdf_files:
-                        btn_link = f"https://t.me/{FSUB_CHANNEL.replace('@', '')}" if FSUB_CHANNEL and not str(FSUB_CHANNEL).startswith("-100") else "https://t.me/telegram"
-                        post_buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔥 Join Our Channel", url=btn_link)]])
-                        
                         target_chat = AUTO_POST_CHANNEL if AUTO_POST_CHANNEL else "me"
+                        # Use the exact same Deep Link Builder
+                        await build_and_send_premium_post(manga['title'], auto_post_tags, len(pages), cover_url, pdf_files, target_chat)
                         
-                        # PREMIUM POST LAYOUT FOR AUTO-POST
-                        post_caption = (
-                            f"🔥 **New Auto-Update**\n\n"
-                            f"📖 **Name:** `{manga['title']}`\n"
-                            f"🏷 **Tags:** `{', '.join(auto_post_tags)}`\n"
-                            f"📄 **Pages:** `{len(pages)}`\n\n"
-                            f"⚡ **@DSB_07's Premium Library**"
-                        )
-                        
-                        try:
-                            # 1. Pehle Cover Image bhejte hain
-                            post_msg = await app.send_photo(
-                                chat_id=target_chat,
-                                photo=cover_url if cover_url else START_IMAGE,
-                                caption=post_caption,
-                                reply_markup=post_buttons
-                            )
-                            
-                            # 2. Phir PDF ko as a Reply bhejte hain
-                            for pdf_file in pdf_files:
-                                if os.path.exists(pdf_file):
-                                    await app.send_document(
-                                        chat_id=target_chat, 
-                                        document=pdf_file,
-                                        reply_to_message_id=post_msg.id
-                                    )
-                                    os.remove(pdf_file)
-                        except Exception as e:
-                            print(f"Auto-post upload error: {e}")
-                            
                         scraped_history.add(manga['link'])
                         await save_to_db(manga['link'])
                     await asyncio.sleep(15) 
@@ -407,6 +390,7 @@ async def start_bot():
     print("🚀 Connecting to Telegram Servers...")
     await app.start()
     print("✅ Bot is ONLINE!")
+    await update_dynamic_links() # Fetches Bot username & Fsub Link
     await load_database()
     asyncio.create_task(auto_post_task())
     await idle()
