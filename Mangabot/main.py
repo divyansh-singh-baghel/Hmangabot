@@ -27,7 +27,7 @@ auto_post_tags = []
 DATABASE_CHANNEL = int(os.environ.get("DATABASE_CHANNEL", "0"))
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
-# Dynamic Settings (Can be changed via Telegram)
+# Dynamic Settings
 FSUB_CHANNEL = os.environ.get("FSUB_CHANNEL", "") 
 AUTO_POST_CHANNEL = "" 
 START_IMAGE = "https://i.postimg.cc/mZh4Hpxb/ayaka.jpg" 
@@ -36,6 +36,7 @@ START_IMAGE = "https://i.postimg.cc/mZh4Hpxb/ayaka.jpg"
 scraped_history = set()
 USERS = set()
 ADMINS = set()
+AWAITING_IMAGE = set() # Naya Tracker image receive karne ke liye
 
 # ==========================================
 # 2. UPGRADED TELEGRAM DATABASE LOGIC
@@ -111,7 +112,6 @@ async def check_fsub_and_admin(client, message, strict_admin=True):
             "Please join the listed channel to activate your access."
         )
         
-        # Safely create button link for public channels
         link = f"https://t.me/{FSUB_CHANNEL.replace('@', '')}" if not str(FSUB_CHANNEL).startswith("-100") else "https://t.me/telegram"
         join_btn = InlineKeyboardMarkup([[InlineKeyboardButton("📢 Join Channel", url=link)]])
         
@@ -125,16 +125,14 @@ async def check_fsub_and_admin(client, message, strict_admin=True):
         return True
 
 # ==========================================
-# 4. ADMIN CONTROL PANEL COMMANDS (NEW!)
+# 4. ADMIN CONTROL PANEL COMMANDS
 # ==========================================
 @app.on_message(filters.command("setfsub") & filters.private)
 async def cmd_setfsub(client, message):
     global FSUB_CHANNEL
     if not is_admin(message.from_user.id): return
     args = message.text.split()
-    if len(args) < 2:
-        return await message.reply_text("❌ **Format:** `/setfsub @YourChannel`\n*(To remove: `/setfsub none`)*")
-    
+    if len(args) < 2: return await message.reply_text("❌ **Format:** `/setfsub @YourChannel`\n*(To remove: `/setfsub none`)*")
     val = args[1]
     if val.lower() == "none":
         FSUB_CHANNEL = ""
@@ -150,9 +148,7 @@ async def cmd_setautopost(client, message):
     global AUTO_POST_CHANNEL
     if not is_admin(message.from_user.id): return
     args = message.text.split()
-    if len(args) < 2:
-        return await message.reply_text("❌ **Format:** `/setautopost @YourChannel`\n*(To remove: `/setautopost none`)*")
-    
+    if len(args) < 2: return await message.reply_text("❌ **Format:** `/setautopost @YourChannel`\n*(To remove: `/setautopost none`)*")
     val = args[1]
     if val.lower() == "none":
         AUTO_POST_CHANNEL = ""
@@ -163,21 +159,30 @@ async def cmd_setautopost(client, message):
         await save_to_db(f"AUTOPOST:{val}")
         await message.reply_text(f"✅ All downloads and Auto-Posts will now be sent to: **{val}**")
 
+# --- NEW SETIMAGE LOGIC (Direct Photo Upload) ---
 @app.on_message(filters.command("setimage") & filters.private)
 async def cmd_setimage(client, message):
     global START_IMAGE
     if not is_admin(message.from_user.id): return
     args = message.text.split()
-    if len(args) < 2: return await message.reply_text("❌ **Format:** `/setimage <link>`\n*(To remove: `/setimage none`)*")
-    new_image = args[1]
-    if new_image.lower() == "none":
+    
+    if len(args) == 2 and args[1].lower() == "none":
         START_IMAGE = None
         await save_to_db("IMAGE:NONE")
-        await message.reply_text("✅ Start Image removed.")
+        await message.reply_text("✅ Start Image removed. Bot will only send text now.")
     else:
-        START_IMAGE = new_image
-        await save_to_db(f"IMAGE:{new_image}")
-        await message.reply_photo(photo=START_IMAGE, caption="✅ **Start Image Updated!**")
+        AWAITING_IMAGE.add(message.from_user.id)
+        await message.reply_text("🖼️ **Send me the new Start Image now.**\n*(Just upload a photo directly in this chat)*")
+
+@app.on_message(filters.photo & filters.private)
+async def handle_photo(client, message):
+    global START_IMAGE
+    if message.from_user.id in AWAITING_IMAGE:
+        # Telegram ka direct fast link (file_id) nikalna
+        START_IMAGE = message.photo.file_id
+        await save_to_db(f"IMAGE:{START_IMAGE}")
+        AWAITING_IMAGE.remove(message.from_user.id)
+        await message.reply_photo(photo=START_IMAGE, caption="✅ **Start Image Updated Successfully!**\n*(It will now load instantly)*")
 
 @app.on_message(filters.command("stats") & filters.private)
 async def cmd_stats(client, message):
@@ -192,7 +197,6 @@ async def cmd_stats(client, message):
     )
     await message.reply_text(stats_text)
 
-# (Keeping standard adminlist, addadmin, deladmin same as before)
 @app.on_message(filters.command("addadmin") & filters.private)
 async def cmd_addadmin(client, message):
     if message.from_user.id != OWNER_ID: return
@@ -239,22 +243,29 @@ async def start_command(client, message):
         else: await message.reply_text(text=welcome_text)
     except Exception: await message.reply_text(text=welcome_text)
 
+# --- NEW FORMATTED HELP COMMAND ---
 @app.on_message(filters.command("help") & filters.private)
 async def help_command(client, message):
     if not await check_fsub_and_admin(client, message): return
     help_text = (
-        "🛠 **Admin Command Menu** 🛠\n\n"
-        "**Settings (NEW):**\n"
-        "`/setfsub @channel` - Set/Remove Force Subscribe\n"
+        "🛠 **Manga Bot - Help Menu** 🛠\n\n"
+        "**1. Manual Search & Download**\n"
+        "Format: `/getmanga <limit> <tags>`\n"
+        "• `<limit>`: The number of results you want (e.g., 1, 3, 5)\n"
+        "• `<tags>`: The keywords or name of the manga.\n"
+        "💡 *Example:* `/getmanga 2 naruto doujin` (Downloads 2 Naruto doujins)\n\n"
+        "**2. Automated Posting (Admin Only)**\n"
+        "Format: `/autoon <tags>`\n"
+        "• Starts checking the site every 30 minutes for the given tags.\n"
+        "💡 *Example:* `/autoon color english`\n\n"
+        "**3. Stop Automated Posting**\n"
+        "Format: `/autooff`\n"
+        "• Stops the background scanning process completely.\n\n"
+        "⚙️ **Admin Controls:**\n"
+        "`/setimage` - Change start picture (Just send photo)\n"
+        "`/setfsub @channel` - Force Subscribe setup\n"
         "`/setautopost @channel` - Redirect downloads to channel\n"
-        "`/setimage <link>` - Change start picture\n\n"
-        "**User & Bot Control:**\n"
-        "`/stats` - View total users & bot stats\n"
-        "`/addadmin <ID>` / `/deladmin <ID>`\n"
-        "`/adminlist` - View all admins\n\n"
-        "**Manga Commands:**\n"
-        "`/getmanga <limit> <tags>` - Manual Download\n"
-        "`/autoon <tags>` / `/autooff` - Auto Posting"
+        "`/stats` - View users & bot data\n"
     )
     await message.reply_text(help_text)
 
@@ -282,11 +293,9 @@ async def fetch_manga(client, message):
         
         pdf_files = download_and_make_pdf(pages, manga['title'])
         if pdf_files:
-            # Button logic updated
             btn_link = f"https://t.me/{FSUB_CHANNEL.replace('@', '')}" if FSUB_CHANNEL and not str(FSUB_CHANNEL).startswith("-100") else "https://t.me/telegram"
             post_buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔥 Join Our Channel", url=btn_link)]])
             
-            # Destination logic updated
             target_chat = AUTO_POST_CHANNEL if AUTO_POST_CHANNEL else message.chat.id
             
             for pdf_file in pdf_files:
