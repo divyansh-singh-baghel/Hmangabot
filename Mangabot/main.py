@@ -45,7 +45,7 @@ AWAITING_IMAGE = set()
 app = Client("manga_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # ==========================================
-# 2. UPGRADED DATABASE & LINKS CACHE (Peer ID Fixed)
+# 2. UPGRADED DATABASE & LINKS CACHE
 # ==========================================
 async def update_dynamic_links():
     global BOT_USERNAME, FSUB_LINK
@@ -65,7 +65,6 @@ async def load_database():
         return
         
     try:
-        # 💡 PEER ID FIX: Wake up the channel to force Telegram to cache it
         wake_msg = await app.send_message(DATABASE_CHANNEL, "🔄 Database Syncing...")
         await asyncio.sleep(1)
         await wake_msg.delete()
@@ -91,9 +90,10 @@ async def load_database():
                 elif text.startswith("AUTOPOST:"):
                     AUTO_POST_CHANNEL = text.split(":", 1)[1]
                     if AUTO_POST_CHANNEL == "NONE": AUTO_POST_CHANNEL = ""
+                elif text.startswith("LINK:"): 
+                    scraped_history.add(text.split(":", 1)[1].strip())
                 elif text.startswith("http"): 
-                    # Sirf actual links ko memory me daalo taaki repeat na ho
-                    scraped_history.add(text) 
+                    scraped_history.add(text.strip())
                     
         print(f"✅ DB Loaded: {len(scraped_history)} Manga | {len(USERS)} Users")
     except Exception as e:
@@ -110,12 +110,12 @@ async def save_to_db(data_string):
 MAIN_HELP_TEXT = (
     "🛠 **Manga Bot - Help Menu** 🛠\n\n"
     "**1. Manual Search & Download**\n"
-    "Format: `/getmanga <limit> <tags>`\n"
-    "• `<limit>`: Number of results (e.g., 1, 3)\n"
-    "• `<tags>`: Keywords of the manga.\n"
+    "Format: `/getmanga [limit] [tags]`\n"
+    "• `[limit]`: Number of results (e.g., 1, 3)\n"
+    "• `[tags]`: Keywords of the manga.\n"
     "💡 *Example:* `/getmanga 2 naruto doujin`\n\n"
     "**2. Automated Posting (Admin Only)**\n"
-    "Format: `/autoon <tags>`\n"
+    "Format: `/autoon [tags]`\n"
     "• Starts checking the site every 30 mins.\n"
     "💡 *Example:* `/autoon color english`\n\n"
     "**3. Stop Automated Posting**\n"
@@ -126,8 +126,8 @@ MAIN_HELP_TEXT = (
     "`/setfsub @channel` - Force Subscribe setup (Type 'none' to remove)\n"
     "`/setautopost @channel` - Redirect downloads (Type 'none' for DM)\n"
     "`/stats` - View total users, manga & bot data\n"
-    "`/addadmin <User_ID>` - Make someone an Admin (Owner only)\n"
-    "`/deladmin <User_ID>` - Remove an Admin (Owner only)\n"
+    "`/addadmin [User_ID]` - Make someone an Admin (Owner only)\n"
+    "`/deladmin [User_ID]` - Remove an Admin (Owner only)\n"
     "`/adminlist` - View all current Admins\n"
 )
 
@@ -175,7 +175,7 @@ async def cmd_setfsub(client, message):
     global FSUB_CHANNEL
     if not is_admin(message.from_user.id): return
     args = message.text.split()
-    if len(args) < 2: return await message.reply_text("❌ Format: `/setfsub @YourChannel`")
+    if len(args) < 2: return await message.reply_text("❌ **Format Error:** Use `/setfsub @YourChannel` or `/setfsub none`")
     val = args[1]
     FSUB_CHANNEL = "" if val.lower() == "none" else val
     await save_to_db(f"FSUB:{'NONE' if val.lower() == 'none' else val}")
@@ -187,7 +187,7 @@ async def cmd_setautopost(client, message):
     global AUTO_POST_CHANNEL
     if not is_admin(message.from_user.id): return
     args = message.text.split()
-    if len(args) < 2: return await message.reply_text("❌ Format: `/setautopost @YourChannel`")
+    if len(args) < 2: return await message.reply_text("❌ **Format Error:** Use `/setautopost @YourChannel` or `/setautopost none`")
     val = args[1]
     AUTO_POST_CHANNEL = "" if val.lower() == "none" else val
     await save_to_db(f"AUTOPOST:{'NONE' if val.lower() == 'none' else val}")
@@ -202,9 +202,11 @@ async def cmd_setimage(client, message):
         START_IMAGE = None
         await save_to_db("IMAGE:NONE")
         await message.reply_text("✅ Start Image removed.")
-    else:
+    elif len(args) == 1:
         AWAITING_IMAGE.add(message.from_user.id)
         await message.reply_text("🖼️ **Send me the new Start Image photo now.**")
+    else:
+        await message.reply_text("❌ **Format Error:** Send `/setimage` to upload a photo or `/setimage none` to remove it.")
 
 @app.on_message(filters.photo & filters.private)
 async def handle_photo(client, message):
@@ -237,7 +239,7 @@ async def cmd_addadmin(client, message):
         ADMINS.add(new_admin)
         await save_to_db(f"ADMIN:{new_admin}")
         await message.reply_text(f"✅ User `{new_admin}` is now an Admin!")
-    except: await message.reply_text("❌ **Format:** `/addadmin <User_ID>`")
+    except Exception: await message.reply_text("❌ **Format Error:** `/addadmin [User_ID]`\n*(Use Number ID, not username)*")
 
 @app.on_message(filters.command("deladmin") & filters.private)
 async def cmd_deladmin(client, message):
@@ -248,7 +250,7 @@ async def cmd_deladmin(client, message):
             ADMINS.remove(del_admin)
             await save_to_db(f"DELADMIN:{del_admin}")
             await message.reply_text(f"🗑️ Admin `{del_admin}` removed.")
-    except: await message.reply_text("❌ **Format:** `/deladmin <User_ID>`")
+    except Exception: await message.reply_text("❌ **Format Error:** `/deladmin [User_ID]`")
 
 @app.on_message(filters.command("adminlist") & filters.private)
 async def cmd_adminlist(client, message):
@@ -320,7 +322,7 @@ async def help_command(client, message):
 # ==========================================
 # 6. DOWNLOAD & POST BUILDER LOGIC
 # ==========================================
-async def build_and_send_premium_post(title, tags, pages_count, cover_url, pdf_files, target_chat):
+async def build_and_send_premium_post(title, tags, pages_count, cover_url, pdf_files, dm_chat_id=None, is_autopost=False):
     db_msg_ids = []
     for pdf_file in pdf_files:
         if os.path.exists(pdf_file):
@@ -345,26 +347,39 @@ async def build_and_send_premium_post(title, tags, pages_count, cover_url, pdf_f
             f"📖 **Name:** `{title}`\n\n"
             f"🏷 **Tags:** `{', '.join(tags)}`\n"
             f"📄 **Pages:** `{pages_count}`\n\n"
-            f"⚡ **Generated by @Waguri07's Bot**"
+            f"⚡ **Generated by @DSB_07's Bot**"
         )
         
-        try:
-            await app.send_photo(
-                chat_id=target_chat,
-                photo=cover_url if cover_url else START_IMAGE,
-                caption=post_caption,
-                reply_markup=post_buttons
-            )
-        except Exception as e:
-            print(f"Post error: {e}")
+        # Dual Posting Logic 
+        if not is_autopost:
+            # Manual /getmanga command: Send to DM
+            if dm_chat_id:
+                try:
+                    await app.send_photo(chat_id=dm_chat_id, photo=cover_url if cover_url else START_IMAGE, caption=post_caption, reply_markup=post_buttons)
+                except Exception as e: print(f"DM Post error: {e}")
+            # And ALSO send to Auto Post Channel if it's connected
+            if AUTO_POST_CHANNEL:
+                try:
+                    await app.send_photo(chat_id=AUTO_POST_CHANNEL, photo=cover_url if cover_url else START_IMAGE, caption=post_caption, reply_markup=post_buttons)
+                except Exception as e: print(f"Channel Post error: {e}")
+        else:
+            # Auto-post process: Send to Channel (or DM if channel isn't set)
+            target = AUTO_POST_CHANNEL if AUTO_POST_CHANNEL else OWNER_ID
+            try:
+                await app.send_photo(chat_id=target, photo=cover_url if cover_url else START_IMAGE, caption=post_caption, reply_markup=post_buttons)
+            except Exception as e: print(f"Auto-post error: {e}")
 
 @app.on_message(filters.command("getmanga") & filters.private)
 async def fetch_manga(client, message):
     if not await check_fsub_and_admin(client, message): return
     args = message.text.split()
-    if len(args) < 3: return await message.reply_text("❌ **Format Error:** `/getmanga <limit> <tags>`")
-    try: limit = int(args[1]); tags = args[2:]
-    except ValueError: return await message.reply_text("❌ Limit must be a number.")
+    if len(args) < 3: 
+        return await message.reply_text("❌ **Format Error:** Please use `/getmanga [limit] [tags]`\n💡 *Example:* `/getmanga 1 naruto`")
+    try: 
+        limit = int(args[1])
+        tags = args[2:]
+    except ValueError: 
+        return await message.reply_text("❌ **Format Error:** Limit must be a number.\n💡 *Example:* `/getmanga 1 naruto`")
 
     status_msg = await message.reply_text(f"🔍 Searching for **{limit}** manga...")
     manga_list = get_manga_list(tags, limit)
@@ -376,6 +391,11 @@ async def fetch_manga(client, message):
         try:
             if " ai " in manga['title'].lower() or "[ai]" in manga['title'].lower(): continue
             
+            # Duplicate Checker
+            if manga['link'] in scraped_history:
+                await message.reply_text(f"⚠️ **Skipped:** `{manga['title']}` is already in the database to prevent duplicates.")
+                continue
+
             pages, cover_url = get_manga_pages(manga['link'])
             if not pages or len(pages) < 7: continue
                 
@@ -384,11 +404,11 @@ async def fetch_manga(client, message):
             
             pdf_files = download_and_make_pdf(pages, manga['title'])
             if pdf_files:
-                target_chat = AUTO_POST_CHANNEL if AUTO_POST_CHANNEL else message.chat.id
-                await build_and_send_premium_post(manga['title'], tags, len(pages), cover_url, pdf_files, target_chat)
+                # Trigger Premium Post with DM Chat ID
+                await build_and_send_premium_post(manga['title'], tags, len(pages), cover_url, pdf_files, dm_chat_id=message.chat.id, is_autopost=False)
                 
                 scraped_history.add(manga['link'])
-                await save_to_db(manga['link']) # Ye line link ko database me text banake save karti hai
+                await save_to_db(f"LINK:{manga['link']}") # Naya format saving ke liye
         except Exception as e:
             print(f"Crash Guard Protected Bot: {e}")
             continue
@@ -410,16 +430,15 @@ async def auto_post_task():
                         pages, cover_url = get_manga_pages(manga['link'])
                         if not pages or len(pages) < 7:
                             scraped_history.add(manga['link'])
-                            await save_to_db(manga['link'])
+                            await save_to_db(f"LINK:{manga['link']}")
                             continue
                             
                         pdf_files = download_and_make_pdf(pages, manga['title'])
                         if pdf_files:
-                            target_chat = AUTO_POST_CHANNEL if AUTO_POST_CHANNEL else "me"
-                            await build_and_send_premium_post(manga['title'], auto_post_tags, len(pages), cover_url, pdf_files, target_chat)
+                            await build_and_send_premium_post(manga['title'], auto_post_tags, len(pages), cover_url, pdf_files, is_autopost=True)
                             
                             scraped_history.add(manga['link'])
-                            await save_to_db(manga['link'])
+                            await save_to_db(f"LINK:{manga['link']}")
                 except Exception as e:
                     print(f"Auto-post error skipped: {e}")
                     continue
@@ -431,10 +450,11 @@ async def start_auto(client, message):
     if not await check_fsub_and_admin(client, message): return
     global auto_post_active, auto_post_tags
     args = message.text.split()
-    if len(args) < 2: return await message.reply_text("❌ **Format:** `/autoon <tags>`")
+    if len(args) < 2: 
+        return await message.reply_text("❌ **Format Error:** Please specify tags.\n💡 *Example:* `/autoon color english`")
     auto_post_tags = args[1:]
     auto_post_active = True
-    await message.reply_text(f"✅ **Auto-Post Enabled!**")
+    await message.reply_text(f"✅ **Auto-Post Enabled!** for tags: `{', '.join(auto_post_tags)}`")
 
 @app.on_message(filters.command("autooff") & filters.private)
 async def stop_auto(client, message):
