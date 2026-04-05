@@ -25,7 +25,13 @@ def run_server():
 auto_post_active = False
 auto_post_tags = []
 
-db_env = os.environ.get("DATABASE_CHANNEL", "0")
+# NAYA: Smart Link Parser (Ab https://t.me/... wale links bhi kaam karenge)
+db_env = os.environ.get("DATABASE_CHANNEL", "0").strip().replace(" ", "")
+if db_env.startswith("https://t.me/"):
+    db_env = "@" + db_env.split("/")[-1]
+elif not db_env.lstrip("-").isdigit() and not db_env.startswith("@") and db_env != "0":
+    db_env = "@" + db_env
+
 try:
     DATABASE_CHANNEL = int(db_env)
 except ValueError:
@@ -69,6 +75,13 @@ async def load_database():
     if DATABASE_CHANNEL == 0 or DATABASE_CHANNEL == "0":
         print("⚠️ WARNING: DATABASE_CHANNEL ID is missing!")
         return
+
+    try:
+        wake_msg = await app.send_message(DATABASE_CHANNEL, "🔄 Database Syncing...")
+        await asyncio.sleep(1)
+        await wake_msg.delete()
+    except Exception as e:
+        print(f"⚠️ Could not wake DB Channel (Make sure bot is admin): {e}")
 
     try:
         async for msg in app.get_chat_history(DATABASE_CHANNEL):
@@ -174,7 +187,7 @@ async def cmd_setfsub(client, message):
     global FSUB_CHANNEL
     if not is_admin(message.from_user.id): return
     args = message.text.split()
-    if len(args) < 2: return await message.reply_text("❌ Format: `/setfsub @YourChannel`")
+    if len(args) < 2: return await message.reply_text("❌ **Format Error:** Use `/setfsub @YourChannel` or `/setfsub none`")
     val = args[1]
     FSUB_CHANNEL = "" if val.lower() == "none" else val
     await save_to_db(f"FSUB:{'NONE' if val.lower() == 'none' else val}")
@@ -186,7 +199,7 @@ async def cmd_setautopost(client, message):
     global AUTO_POST_CHANNEL
     if not is_admin(message.from_user.id): return
     args = message.text.split()
-    if len(args) < 2: return await message.reply_text("❌ Format: `/setautopost @YourChannel`")
+    if len(args) < 2: return await message.reply_text("❌ **Format Error:** Use `/setautopost @YourChannel` or `/setautopost none`")
     val = args[1]
     AUTO_POST_CHANNEL = "" if val.lower() == "none" else val
     await save_to_db(f"AUTOPOST:{'NONE' if val.lower() == 'none' else val}")
@@ -201,9 +214,11 @@ async def cmd_setimage(client, message):
         START_IMAGE = None
         await save_to_db("IMAGE:NONE")
         await message.reply_text("✅ Start Image removed.")
-    else:
+    elif len(args) == 1:
         AWAITING_IMAGE.add(message.from_user.id)
         await message.reply_text("🖼️ **Send me the new Start Image photo now.**")
+    else:
+        await message.reply_text("❌ **Format Error:** Send `/setimage` to upload a photo or `/setimage none` to remove it.")
 
 @app.on_message(filters.photo & filters.private)
 async def handle_photo(client, message):
@@ -236,7 +251,7 @@ async def cmd_addadmin(client, message):
         ADMINS.add(new_admin)
         await save_to_db(f"ADMIN:{new_admin}")
         await message.reply_text(f"✅ User `{new_admin}` is now an Admin!")
-    except Exception: await message.reply_text("❌ **Format:** `/addadmin [User_ID]`")
+    except Exception: await message.reply_text("❌ **Format Error:** `/addadmin [User_ID]`\n*(Use Number ID, not username)*")
 
 @app.on_message(filters.command("deladmin") & filters.private)
 async def cmd_deladmin(client, message):
@@ -247,7 +262,7 @@ async def cmd_deladmin(client, message):
             ADMINS.remove(del_admin)
             await save_to_db(f"DELADMIN:{del_admin}")
             await message.reply_text(f"🗑️ Admin `{del_admin}` removed.")
-    except Exception: await message.reply_text("❌ **Format:** `/deladmin [User_ID]`")
+    except Exception: await message.reply_text("❌ **Format Error:** `/deladmin [User_ID]`")
 
 @app.on_message(filters.command("adminlist") & filters.private)
 async def cmd_adminlist(client, message):
@@ -381,9 +396,13 @@ async def build_and_send_premium_post(title, tags, pages_count, cover_url, pdf_f
 async def fetch_manga(client, message):
     if not await check_fsub_and_admin(client, message): return
     args = message.text.split()
-    if len(args) < 3: return await message.reply_text("❌ **Format Error:** `/getmanga [limit] [tags]`")
-    try: limit = int(args[1]); tags = args[2:]
-    except ValueError: return await message.reply_text("❌ Limit must be a number.")
+    if len(args) < 3: 
+        return await message.reply_text("❌ **Format Error:** Please use `/getmanga [limit] [tags]`\n💡 *Example:* `/getmanga 1 naruto`")
+    try: 
+        limit = int(args[1])
+        tags = args[2:]
+    except ValueError: 
+        return await message.reply_text("❌ **Format Error:** Limit must be a number.\n💡 *Example:* `/getmanga 1 naruto`")
 
     status_msg = await message.reply_text(f"🔍 Searching for **{limit}** manga...")
     manga_list = get_manga_list(tags, limit)
@@ -452,10 +471,11 @@ async def start_auto(client, message):
     if not await check_fsub_and_admin(client, message): return
     global auto_post_active, auto_post_tags
     args = message.text.split()
-    if len(args) < 2: return await message.reply_text("❌ **Format:** `/autoon [tags]`")
+    if len(args) < 2: 
+        return await message.reply_text("❌ **Format Error:** Please specify tags.\n💡 *Example:* `/autoon color english`")
     auto_post_tags = args[1:]
     auto_post_active = True
-    await message.reply_text(f"✅ **Auto-Post Enabled!**")
+    await message.reply_text(f"✅ **Auto-Post Enabled!** for tags: `{', '.join(auto_post_tags)}`")
 
 @app.on_message(filters.command("autooff") & filters.private)
 async def stop_auto(client, message):
