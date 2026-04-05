@@ -24,7 +24,14 @@ def run_server():
 
 auto_post_active = False
 auto_post_tags = []
-DATABASE_CHANNEL = int(os.environ.get("DATABASE_CHANNEL", "0"))
+
+# NAYA: Ab yeh dono (Number aur @Username) support karega
+db_env = os.environ.get("DATABASE_CHANNEL", "0")
+try:
+    DATABASE_CHANNEL = int(db_env)
+except ValueError:
+    DATABASE_CHANNEL = db_env 
+
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
 # Dynamic Settings
@@ -60,7 +67,7 @@ async def update_dynamic_links():
 async def load_database():
     global START_IMAGE, FSUB_CHANNEL, AUTO_POST_CHANNEL
     print("📥 Loading Data from Database Channel...")
-    if DATABASE_CHANNEL == 0:
+    if DATABASE_CHANNEL == 0 or DATABASE_CHANNEL == "0":
         print("⚠️ WARNING: DATABASE_CHANNEL ID is missing!")
         return
         
@@ -69,7 +76,7 @@ async def load_database():
         await asyncio.sleep(1)
         await wake_msg.delete()
     except Exception as e:
-        print(f"⚠️ Could not wake DB Channel (Make sure bot is admin): {e}")
+        print(f"⚠️ Could not wake DB Channel (Make sure bot is admin & ID is correct): {e}")
 
     try:
         async for msg in app.get_chat_history(DATABASE_CHANNEL):
@@ -100,7 +107,7 @@ async def load_database():
         print(f"⚠️ Peer ID Invalid or DB Error: {e}")
 
 async def save_to_db(data_string):
-    if DATABASE_CHANNEL != 0:
+    if DATABASE_CHANNEL != 0 and DATABASE_CHANNEL != "0":
         try: await app.send_message(DATABASE_CHANNEL, data_string)
         except Exception: pass
 
@@ -175,7 +182,7 @@ async def cmd_setfsub(client, message):
     global FSUB_CHANNEL
     if not is_admin(message.from_user.id): return
     args = message.text.split()
-    if len(args) < 2: return await message.reply_text("❌ **Format Error:** Use `/setfsub @YourChannel` or `/setfsub none`")
+    if len(args) < 2: return await message.reply_text("❌ Format: `/setfsub @YourChannel`")
     val = args[1]
     FSUB_CHANNEL = "" if val.lower() == "none" else val
     await save_to_db(f"FSUB:{'NONE' if val.lower() == 'none' else val}")
@@ -187,7 +194,7 @@ async def cmd_setautopost(client, message):
     global AUTO_POST_CHANNEL
     if not is_admin(message.from_user.id): return
     args = message.text.split()
-    if len(args) < 2: return await message.reply_text("❌ **Format Error:** Use `/setautopost @YourChannel` or `/setautopost none`")
+    if len(args) < 2: return await message.reply_text("❌ Format: `/setautopost @YourChannel`")
     val = args[1]
     AUTO_POST_CHANNEL = "" if val.lower() == "none" else val
     await save_to_db(f"AUTOPOST:{'NONE' if val.lower() == 'none' else val}")
@@ -202,11 +209,9 @@ async def cmd_setimage(client, message):
         START_IMAGE = None
         await save_to_db("IMAGE:NONE")
         await message.reply_text("✅ Start Image removed.")
-    elif len(args) == 1:
+    else:
         AWAITING_IMAGE.add(message.from_user.id)
         await message.reply_text("🖼️ **Send me the new Start Image photo now.**")
-    else:
-        await message.reply_text("❌ **Format Error:** Send `/setimage` to upload a photo or `/setimage none` to remove it.")
 
 @app.on_message(filters.photo & filters.private)
 async def handle_photo(client, message):
@@ -239,7 +244,7 @@ async def cmd_addadmin(client, message):
         ADMINS.add(new_admin)
         await save_to_db(f"ADMIN:{new_admin}")
         await message.reply_text(f"✅ User `{new_admin}` is now an Admin!")
-    except Exception: await message.reply_text("❌ **Format Error:** `/addadmin [User_ID]`\n*(Use Number ID, not username)*")
+    except Exception: await message.reply_text("❌ **Format:** `/addadmin [User_ID]`")
 
 @app.on_message(filters.command("deladmin") & filters.private)
 async def cmd_deladmin(client, message):
@@ -250,7 +255,7 @@ async def cmd_deladmin(client, message):
             ADMINS.remove(del_admin)
             await save_to_db(f"DELADMIN:{del_admin}")
             await message.reply_text(f"🗑️ Admin `{del_admin}` removed.")
-    except Exception: await message.reply_text("❌ **Format Error:** `/deladmin [User_ID]`")
+    except Exception: await message.reply_text("❌ **Format:** `/deladmin [User_ID]`")
 
 @app.on_message(filters.command("adminlist") & filters.private)
 async def cmd_adminlist(client, message):
@@ -320,54 +325,77 @@ async def help_command(client, message):
     await message.reply_text(MAIN_HELP_TEXT)
 
 # ==========================================
-# 6. DOWNLOAD & POST BUILDER LOGIC
+# 6. BULLETPROOF DOWNLOAD & POST BUILDER LOGIC
 # ==========================================
 async def build_and_send_premium_post(title, tags, pages_count, cover_url, pdf_files, dm_chat_id=None, is_autopost=False):
     db_msg_ids = []
+    
+    # Koshish karo Database mein chhupane ki
     for pdf_file in pdf_files:
         if os.path.exists(pdf_file):
-            db_msg = await app.send_document(
-                chat_id=DATABASE_CHANNEL,
-                document=pdf_file,
-                caption=f"📚 **{title}**"
-            )
-            db_msg_ids.append(str(db_msg.id))
-            os.remove(pdf_file)
+            try:
+                db_msg = await app.send_document(
+                    chat_id=DATABASE_CHANNEL,
+                    document=pdf_file,
+                    caption=f"📚 **{title}**"
+                )
+                db_msg_ids.append(str(db_msg.id))
+            except Exception as e:
+                print(f"⚠️ DB Upload Failed (Peer ID Issue Bypass Triggered): {e}")
 
+    post_caption = (
+        f"📖 **Name:** `{title}`\n\n"
+        f"🏷 **Tags:** `{', '.join(tags)}`\n"
+        f"📄 **Pages:** `{pages_count}`\n\n"
+        f"⚡ **Generated by @DSB_07's Bot**"
+    )
+
+    # NAYA: Bulletproof Fallback System
     if db_msg_ids:
         dl_param = "dl_" + "-".join(db_msg_ids)
         download_link = f"https://t.me/{BOT_USERNAME}?start={dl_param}"
-        
         post_buttons = InlineKeyboardMarkup([
             [InlineKeyboardButton("📥 Download Manga (PDF)", url=download_link)],
             [InlineKeyboardButton("🔥 Join Our Channel", url=FSUB_LINK)]
         ])
-        
-        post_caption = (
-            f"📖 **Name:** `{title}`\n\n"
-            f"🏷 **Tags:** `{', '.join(tags)}`\n"
-            f"📄 **Pages:** `{pages_count}`\n\n"
-            f"⚡ **Generated by @DSB_07's Bot**"
-        )
-        
-        # Dual Posting Logic 
-        if not is_autopost:
-            # Manual /getmanga command: Send to DM
-            if dm_chat_id:
-                try:
-                    await app.send_photo(chat_id=dm_chat_id, photo=cover_url if cover_url else START_IMAGE, caption=post_caption, reply_markup=post_buttons)
-                except Exception as e: print(f"DM Post error: {e}")
-            # And ALSO send to Auto Post Channel if it's connected
-            if AUTO_POST_CHANNEL:
-                try:
-                    await app.send_photo(chat_id=AUTO_POST_CHANNEL, photo=cover_url if cover_url else START_IMAGE, caption=post_caption, reply_markup=post_buttons)
-                except Exception as e: print(f"Channel Post error: {e}")
-        else:
-            # Auto-post process: Send to Channel (or DM if channel isn't set)
-            target = AUTO_POST_CHANNEL if AUTO_POST_CHANNEL else OWNER_ID
-            try:
-                await app.send_photo(chat_id=target, photo=cover_url if cover_url else START_IMAGE, caption=post_caption, reply_markup=post_buttons)
-            except Exception as e: print(f"Auto-post error: {e}")
+    else:
+        # Agar Database Peer ID Invalid hua, toh button mat banao
+        post_buttons = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔥 Join Our Channel", url=FSUB_LINK)]
+        ])
+
+    async def send_to_target(target_chat):
+        try:
+            post_msg = await app.send_photo(
+                chat_id=target_chat,
+                photo=cover_url if cover_url else START_IMAGE,
+                caption=post_caption,
+                reply_markup=post_buttons
+            )
+            # FALLBACK: Agar DB mein upload fail ho gaya tha, toh PDF seedha photo ke reply me bhej do!
+            if not db_msg_ids:
+                for pdf_file in pdf_files:
+                    if os.path.exists(pdf_file):
+                        await app.send_document(
+                            chat_id=target_chat, 
+                            document=pdf_file, 
+                            reply_to_message_id=post_msg.id
+                        )
+        except Exception as e:
+            print(f"Post error: {e}")
+
+    if not is_autopost:
+        if dm_chat_id: await send_to_target(dm_chat_id)
+        if AUTO_POST_CHANNEL: await send_to_target(AUTO_POST_CHANNEL)
+    else:
+        target = AUTO_POST_CHANNEL if AUTO_POST_CHANNEL else OWNER_ID
+        await send_to_target(target)
+
+    # Hard Cleanup to save disk space
+    for pdf_file in pdf_files:
+        if os.path.exists(pdf_file):
+            try: os.remove(pdf_file)
+            except: pass
 
 @app.on_message(filters.command("getmanga") & filters.private)
 async def fetch_manga(client, message):
@@ -391,9 +419,8 @@ async def fetch_manga(client, message):
         try:
             if " ai " in manga['title'].lower() or "[ai]" in manga['title'].lower(): continue
             
-            # Duplicate Checker
             if manga['link'] in scraped_history:
-                await message.reply_text(f"⚠️ **Skipped:** `{manga['title']}` is already in the database to prevent duplicates.")
+                await message.reply_text(f"⚠️ **Skipped:** `{manga['title']}` is already in the database.")
                 continue
 
             pages, cover_url = get_manga_pages(manga['link'])
@@ -404,11 +431,10 @@ async def fetch_manga(client, message):
             
             pdf_files = download_and_make_pdf(pages, manga['title'])
             if pdf_files:
-                # Trigger Premium Post with DM Chat ID
                 await build_and_send_premium_post(manga['title'], tags, len(pages), cover_url, pdf_files, dm_chat_id=message.chat.id, is_autopost=False)
                 
                 scraped_history.add(manga['link'])
-                await save_to_db(f"LINK:{manga['link']}") # Naya format saving ke liye
+                await save_to_db(f"LINK:{manga['link']}") 
         except Exception as e:
             print(f"Crash Guard Protected Bot: {e}")
             continue
