@@ -6,6 +6,8 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQ
 from pyrogram.errors import UserNotParticipant
 from flask import Flask
 
+# NAYA IMPORT (Ad System ke liye)
+import token_manager 
 from scraper import get_manga_list, get_manga_pages, download_and_make_pdf
 from config import API_ID, API_HASH, BOT_TOKEN
 
@@ -25,7 +27,9 @@ def run_server():
 auto_post_active = False
 auto_post_tags = []
 
-# NAYA: Smart Link Parser (Ab https://t.me/... wale links bhi kaam karenge)
+# NAYA: Queue System Lock
+download_lock = asyncio.Lock()
+
 db_env = os.environ.get("DATABASE_CHANNEL", "0").strip().replace(" ", "")
 if db_env.startswith("https://t.me/"):
     db_env = "@" + db_env.split("/")[-1]
@@ -162,13 +166,14 @@ async def check_fsub_and_admin(client, message, strict_admin=True):
         await client.get_chat_member(FSUB_CHANNEL, user_id)
         return True 
     except UserNotParticipant:
+        # NAYA: Clean FSUB Menu with "Join Now" link
         fsub_text = (
-            f"> 👤 **User:** {message.from_user.first_name}\n\n"
-            "🔐 **Membership Required**\n\n"
-            "Please join the listed channel to activate your access."
+            f"👤 **Hello {message.from_user.first_name}**\n\n"
+            "🔐 **Join Channel to Use Bot**\n\n"
+            "You must join our channel to use this bot and access premium manga."
         )
         fsub_buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📢 Join Channel To Use Bot", url=FSUB_LINK)],
+            [InlineKeyboardButton("📢 Join Now", url=FSUB_LINK)],
             [InlineKeyboardButton("♻️ Try Again", callback_data="check_start")]
         ])
         try:
@@ -291,18 +296,62 @@ async def handle_callback(client, message: CallbackQuery):
             await message.answer("❌ Error.")
 
 # ==========================================
-# 5. START & DEEP LINK DOWNLOAD HANDLER
+# 5. START & 24H AD VERIFICATION HANDLER
 # ==========================================
 @app.on_message(filters.command("start") & filters.private)
 async def start_command(client, message):
     if not await check_fsub_and_admin(client, message, strict_admin=False): return
     
-    # --- DEEP LINKING MAGIC LOGIC ---
+    user_id = message.from_user.id
+    
+    # --- DEEP LINKING & AD VERIFICATION MAGIC ---
     if len(message.command) > 1:
         arg = message.command[1]
+        
+        # Scenario A: User verified their token successfully
+        if arg.startswith("tok_"):
+            is_valid, pending_dl = token_manager.verify_token(user_id, arg)
+            if is_valid:
+                await message.reply_text("🎉 **24-Hour Premium Pass Activated!**\nYou can now download unlimited manga without ads for the next 24 hours.")
+                if pending_dl:
+                    arg = pending_dl # Change arg to dl_ format and continue to file fetch
+                else:
+                    return
+            else:
+                await message.reply_text("❌ **Invalid or Expired Token.** Please generate a new link.")
+                return
+
+        # Scenario B: User wants to download a file
         if arg.startswith("dl_"):
+            # Check if user has valid 24h pass (Admins bypass automatically)
+            if not token_manager.has_valid_pass(user_id) and not is_admin(user_id):
+                token = token_manager.generate_token(user_id, pending_dl=arg)
+                verify_link = f"https://t.me/{BOT_USERNAME}?start={token}"
+                short_link = token_manager.get_short_link(verify_link)
+                
+                locked_text = (
+                    "⛔ **VIP Pass Expired**\n\n"
+                    "To keep the bot alive, please verify your access. "
+                    "Click the button below to get your **24-Hour VIP Pass** and unlock unlimited ad-free downloads!"
+                )
+                
+                # Replace with your actual tutorial link later
+                TUTORIAL_LINK = "https://t.me/telegram" 
+                locked_buttons = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔓 Verify & Unlock 24H Pass", url=short_link)],
+                    [InlineKeyboardButton("❓ How to Open / Tutorial", url=TUTORIAL_LINK)]
+                ])
+                locked_image = "https://i.postimg.cc/mZh4Hpxb/ayaka.jpg" # Placeholder Locked Banner
+                
+                try:
+                    await message.reply_photo(photo=locked_image, caption=locked_text, reply_markup=locked_buttons)
+                except:
+                    await message.reply_text(locked_text, reply_markup=locked_buttons)
+                return
+
+            # Pass is Valid -> Fetch the File
             db_ids = arg.replace("dl_", "").split("-")
-            await message.reply_text("📥 **Fetching your Manga securely... Please wait.**")
+            status_msg = await message.reply_text("📥 **Fetching your Manga securely... Please wait.**")
             for db_msg_id in db_ids:
                 try:
                     await app.copy_message(
@@ -312,6 +361,7 @@ async def start_command(client, message):
                     )
                 except Exception as e:
                     print(f"Deep link fetch error: {e}")
+            await status_msg.delete()
             return 
             
     welcome_text = (
@@ -375,7 +425,8 @@ async def build_and_send_premium_post(title, tags, pages_count, cover_url, pdf_f
                 chat_id=target_chat,
                 photo=cover_url if cover_url else START_IMAGE,
                 caption=post_caption,
-                reply_markup=post_buttons
+                reply_markup=post_buttons,
+                has_spoiler=True  # NAYA: Image par Spoiler blur effect lag jayega
             )
         except Exception as e:
             print(f"Post error in {target_chat}: {e}")
@@ -424,7 +475,10 @@ async def fetch_manga(client, message):
             eta_seconds = int(len(pages) * 0.8)
             await status_msg.edit_text(f"📥 **{manga['title']}**\n📄 Pages: {len(pages)} | ⏳ ETA: ~{eta_seconds}s")
             
-            pdf_files = download_and_make_pdf(pages, manga['title'])
+            # NAYA: Queue System - Sirf ek PDF ek time par process hogi (RAM Saver)
+            async with download_lock:
+                pdf_files = download_and_make_pdf(pages, manga['title'])
+                
             if pdf_files:
                 await build_and_send_premium_post(manga['title'], tags, len(pages), cover_url, pdf_files, dm_chat_id=message.chat.id, is_autopost=False)
                 
@@ -453,8 +507,11 @@ async def auto_post_task():
                             scraped_history.add(manga['link'])
                             await save_to_db(f"LINK:{manga['link']}")
                             continue
+                        
+                        # NAYA: Queue System for Autopost too
+                        async with download_lock:
+                            pdf_files = download_and_make_pdf(pages, manga['title'])
                             
-                        pdf_files = download_and_make_pdf(pages, manga['title'])
                         if pdf_files:
                             await build_and_send_premium_post(manga['title'], auto_post_tags, len(pages), cover_url, pdf_files, is_autopost=True)
                             
