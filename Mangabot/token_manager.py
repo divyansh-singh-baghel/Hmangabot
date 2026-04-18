@@ -67,6 +67,8 @@ def verify_token(user_id, token):
             return True, pending_dl
     return False, None
 
+# Baaki upar ka code same rahega...
+
 def get_short_link(long_url):
     if not SHORTENER_API_KEY or SHORTENER_API_KEY == "YOUR_API_KEY_HERE":
         print("⚠️ API Key missing! Returning direct Telegram link.")
@@ -74,16 +76,27 @@ def get_short_link(long_url):
         
     try:
         encoded_url = urllib.parse.quote(long_url)
-        api_call = f"{SHORTENER_API_URL}?api={SHORTENER_API_KEY}&url={encoded_url}"
-        response = requests.get(api_call).json()
+        # NAYA: &format=text add kiya taaki direct link mile, JSON error na aaye
+        api_call = f"{SHORTENER_API_URL}?api={SHORTENER_API_KEY}&url={encoded_url}&format=text"
         
-        if response.get("status") == "success":
+        response = requests.get(api_call)
+        
+        # Agar link direct text format me mila (http se shuru hone wala)
+        if response.status_code == 200 and response.text.startswith("http"):
             print("✅ Ad Link Generated Successfully!")
-            return response.get("shortenedUrl")
-        else:
-            # Agar API error de (jaise invalid key), toh Render Logs me dikhega
-            print(f"❌ LinkShortify API Error: {response}")
-            return long_url
+            return response.text.strip()
+            
+        # Agar phir bhi JSON aaye toh fallback:
+        try:
+            data = response.json()
+            if data.get("status") == "success":
+                print("✅ Ad Link Generated Successfully!")
+                return data.get("shortenedUrl")
+        except:
+            pass
+            
+        print(f"❌ LinkShortify API Error/HTML Response: {response.text}")
+        return long_url
     except Exception as e:
         print(f"❌ API Request Failed: {e}")
         return long_url
