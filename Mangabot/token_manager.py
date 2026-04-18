@@ -11,9 +11,9 @@ DB_FILE = "user_data.json"
 # ==========================================
 # ⚙️ URL SHORTENER API CONFIGURATION
 # ==========================================
-# Ab API Details Render ke Environment Variables se aayengi
-SHORTENER_API_URL = os.environ.get("SHORTENER_API_URL", "https://shrinkearn.com/api") 
-SHORTENER_API_KEY = os.environ.get("SHORTENER_API_KEY", "")
+# FIX: Direct LinkShortify URL default kar diya hai taaki error na aaye
+SHORTENER_API_URL = os.environ.get("SHORTENER_API_URL", "https://linkshortify.com/api").strip()
+SHORTENER_API_KEY = os.environ.get("SHORTENER_API_KEY", "").strip()
 
 def load_data():
     if not os.path.exists(DB_FILE):
@@ -69,15 +69,21 @@ def verify_token(user_id, token):
 
 def get_short_link(long_url):
     if not SHORTENER_API_KEY or SHORTENER_API_KEY == "YOUR_API_KEY_HERE":
-        return long_url # Agar API key nahi dali, toh direct link de dega
+        print("⚠️ API Key missing! Returning direct Telegram link.")
+        return long_url 
         
     try:
         encoded_url = urllib.parse.quote(long_url)
         api_call = f"{SHORTENER_API_URL}?api={SHORTENER_API_KEY}&url={encoded_url}"
         response = requests.get(api_call).json()
+        
         if response.get("status") == "success":
+            print("✅ Ad Link Generated Successfully!")
             return response.get("shortenedUrl")
-        return long_url
+        else:
+            # Agar API error de (jaise invalid key), toh Render Logs me dikhega
+            print(f"❌ LinkShortify API Error: {response}")
+            return long_url
     except Exception as e:
-        print(f"Shortener API Error: {e}")
+        print(f"❌ API Request Failed: {e}")
         return long_url
