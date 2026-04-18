@@ -16,7 +16,12 @@ from flask import Flask
 # ⚙️ TOKEN MANAGER & URL SHORTENER
 # ==========================================
 DB_FILE = "user_data.json"
+
+# FIX: Yahan force kar diya hai ki humesha Developer API hi use ho, taaki key leak na ho.
 SHORTENER_API_URL = os.environ.get("SHORTENER_API_URL", "https://linkshortify.com/api").strip()
+if "/st" in SHORTENER_API_URL:
+    SHORTENER_API_URL = SHORTENER_API_URL.replace("/st", "/api")
+    
 SHORTENER_API_KEY = os.environ.get("SHORTENER_API_KEY", "").strip()
 
 def load_data():
@@ -57,29 +62,31 @@ def verify_token(user_id, token):
         return True, pending_dl
     return False, None
 
+# ✅ NAYA SECURE FUNCTION: API Key hide karega aur valid short link return karega
 def get_short_link(long_url):
     if not SHORTENER_API_KEY or SHORTENER_API_KEY == "YOUR_API_KEY_HERE":
         print("⚠️ API Key missing! Returning direct Telegram link.")
         return long_url 
         
     try:
-        encoded_url = urllib.parse.quote(long_url)
+        # safe='' ensure karta hai ki 'https://' poori tarah 'https%3A%2F%2F' me encode ho
+        encoded_url = urllib.parse.quote(long_url, safe='')
         
-        # NAYA JADOO: Agar Quick Link (/st) use kar rahe ho, toh request mat bhejo, direct link generate karo!
-        if "/st" in SHORTENER_API_URL:
-            quick_link = f"{SHORTENER_API_URL}?api={SHORTENER_API_KEY}&url={encoded_url}"
-            print("✅ Quick Link Detected! Direct link sent.")
-            return quick_link
-            
+        # Backend Request: User ko ye URL kabhi nahi dikhega, API key safe rahegi
         api_call = f"{SHORTENER_API_URL}?api={SHORTENER_API_KEY}&url={encoded_url}&format=text"
         response = requests.get(api_call)
         
+        # LinkShortify directly clean link return karega (e.g. https://linkshortify.com/aBcD)
         if response.status_code == 200 and response.text.startswith("http"):
+            print("✅ Ad Link Generated Securely!")
             return response.text.strip()
             
+        # Fallback agar JSON return hua ho
         try:
             data = response.json()
-            if data.get("status") == "success": return data.get("shortenedUrl")
+            if data.get("status") == "success": 
+                print("✅ Ad Link Generated Securely!")
+                return data.get("shortenedUrl")
         except: pass
             
         print(f"❌ API Error: Invalid Response -> {response.text[:50]}")
@@ -168,7 +175,7 @@ async def load_database():
         return
 
     try:
-        # NAYA: Pinned file se history read karo (Bypasses Telegram GetHistory Group Block)
+        # Pinned file se history read karo (Bypasses Telegram GetHistory Group Block)
         chat = await app.get_chat(DATABASE_CHANNEL)
         pinned = chat.pinned_message
         
