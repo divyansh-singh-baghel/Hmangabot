@@ -1,19 +1,110 @@
 import os
 import threading
 import asyncio
+import json
+import time
+import random
+import string
+import requests
+import urllib.parse
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import UserNotParticipant
 from flask import Flask
 
-# NAYA IMPORT (Ad System ke liye)
-import token_manager 
-from scraper import get_manga_list, get_manga_pages, download_and_make_pdf
-from config import API_ID, API_HASH, BOT_TOKEN
+# ==========================================
+# ⚙️ TOKEN MANAGER LOGIC (Integrated)
+# ==========================================
+DB_FILE = "user_data.json"
+SHORTENER_API_URL = os.environ.get("SHORTENER_API_URL", "https://linkshortify.com/api").strip()
+SHORTENER_API_KEY = os.environ.get("SHORTENER_API_KEY", "").strip()
+
+def load_data():
+    if not os.path.exists(DB_FILE):
+        return {}
+    try:
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_data(data):
+    with open(DB_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+def has_valid_pass(user_id):
+    data = load_data()
+    user_str = str(user_id)
+    if user_str in data:
+        expiry = data[user_str].get("expiry", 0)
+        if time.time() < expiry:
+            return True
+    return False
+
+def generate_token(user_id, pending_dl=None):
+    data = load_data()
+    user_str = str(user_id)
+    token = "tok_" + "".join(random.choices(string.ascii_letters + string.digits, k=8))
+    
+    if user_str not in data:
+        data[user_str] = {}
+        
+    data[user_str]["current_token"] = token
+    if pending_dl:
+        data[user_str]["pending_dl"] = pending_dl
+        
+    save_data(data)
+    return token
+
+def verify_token(user_id, token):
+    data = load_data()
+    user_str = str(user_id)
+    if user_str in data:
+        if data[user_str].get("current_token") == token:
+            data[user_str]["expiry"] = time.time() + 86400
+            data[user_str]["current_token"] = None 
+            pending_dl = data[user_str].get("pending_dl")
+            data[user_str]["pending_dl"] = None
+            save_data(data)
+            return True, pending_dl
+    return False, None
+
+def get_short_link(long_url):
+    if not SHORTENER_API_KEY or SHORTENER_API_KEY == "YOUR_API_KEY_HERE":
+        print("⚠️ API Key missing! Returning direct Telegram link.")
+        return long_url 
+        
+    try:
+        encoded_url = urllib.parse.quote(long_url)
+        # FIX: Yahan &format=text add kar diya hai taaki JSON error na aaye!
+        api_call = f"{SHORTENER_API_URL}?api={SHORTENER_API_KEY}&url={encoded_url}&format=text"
+        response = requests.get(api_call)
+        
+        if response.status_code == 200 and response.text.startswith("http"):
+            print("✅ Ad Link Generated Successfully!")
+            return response.text.strip()
+            
+        try:
+            data = response.json()
+            if data.get("status") == "success":
+                print("✅ Ad Link Generated Successfully!")
+                return data.get("shortenedUrl")
+        except:
+            pass
+            
+        print(f"❌ API Error: {response.text}")
+        return long_url
+    except Exception as e:
+        print(f"❌ API Request Failed: {e}")
+        return long_url
+
 
 # ==========================================
 # 1. DUMMY WEB SERVER & GLOBALS
 # ==========================================
+from scraper import get_manga_list, get_manga_pages, download_and_make_pdf
+from config import API_ID, API_HASH, BOT_TOKEN
+
 web_app = Flask(__name__)
 
 @web_app.route('/')
@@ -27,7 +118,7 @@ def run_server():
 auto_post_active = False
 auto_post_tags = []
 
-# NAYA: Queue System Lock
+# Queue System Lock
 download_lock = asyncio.Lock()
 
 db_env = os.environ.get("DATABASE_CHANNEL", "0").strip().replace(" ", "")
@@ -43,16 +134,13 @@ except ValueError:
 
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
-# Dynamic Settings
 FSUB_CHANNEL = os.environ.get("FSUB_CHANNEL", "") 
 AUTO_POST_CHANNEL = "" 
 START_IMAGE = "https://i.postimg.cc/mZh4Hpxb/ayaka.jpg" 
 
-# Deep Link Variables
 BOT_USERNAME = ""
 FSUB_LINK = "https://t.me/telegram"
 
-# Memory Arrays
 scraped_history = set()
 USERS = set()
 ADMINS = set()
@@ -69,9 +157,17 @@ async def update_dynamic_links():
     BOT_USERNAME = me.username
     if FSUB_CHANNEL:
         try:
-            FSUB_LINK = await app.export_chat_invite_link(FSUB_CHANNEL)
-        except Exception:
-            FSUB_LINK = f"https://t.me/{str(FSUB_CHANNEL).replace('@', '')}"
+            chat = await app.get_chat(FSUB_CHANNEL)
+            if chat.invite_link:
+                FSUB_LINK = chat.invite_link
+            else:
+                FSUB_LINK = await app.export_chat_invite_link(FSUB_CHANNEL)
+        except Exception as e:
+            print(f"⚠️ Invite Link Error: {e}")
+            if str(FSUB_CHANNEL).startswith("-100"):
+                FSUB_LINK = "https://t.me/telegram"
+            else:
+                FSUB_LINK = f"https://t.me/{str(FSUB_CHANNEL).replace('@', '')}"
 
 async def load_database():
     global START_IMAGE, FSUB_CHANNEL, AUTO_POST_CHANNEL
@@ -166,7 +262,6 @@ async def check_fsub_and_admin(client, message, strict_admin=True):
         await client.get_chat_member(FSUB_CHANNEL, user_id)
         return True 
     except UserNotParticipant:
-        # NAYA: Clean FSUB Menu with "Join Now" link
         fsub_text = (
             f"👤 **Hello {message.from_user.first_name}**\n\n"
             "🔐 **Join Channel to Use Bot**\n\n"
@@ -304,30 +399,26 @@ async def start_command(client, message):
     
     user_id = message.from_user.id
     
-    # --- DEEP LINKING & AD VERIFICATION MAGIC ---
     if len(message.command) > 1:
         arg = message.command[1]
         
-        # Scenario A: User verified their token successfully
         if arg.startswith("tok_"):
-            is_valid, pending_dl = token_manager.verify_token(user_id, arg)
+            is_valid, pending_dl = verify_token(user_id, arg)
             if is_valid:
                 await message.reply_text("🎉 **24-Hour Premium Pass Activated!**\nYou can now download unlimited manga without ads for the next 24 hours.")
                 if pending_dl:
-                    arg = pending_dl # Change arg to dl_ format and continue to file fetch
+                    arg = pending_dl 
                 else:
                     return
             else:
                 await message.reply_text("❌ **Invalid or Expired Token.** Please generate a new link.")
                 return
 
-        # Scenario B: User wants to download a file
         if arg.startswith("dl_"):
-            # Check if user has valid 24h pass (Admins bypass automatically)
-            if not token_manager.has_valid_pass(user_id) and not is_admin(user_id):
-                token = token_manager.generate_token(user_id, pending_dl=arg)
+            if not has_valid_pass(user_id) and not is_admin(user_id):
+                token = generate_token(user_id, pending_dl=arg)
                 verify_link = f"https://t.me/{BOT_USERNAME}?start={token}"
-                short_link = token_manager.get_short_link(verify_link)
+                short_link = get_short_link(verify_link)
                 
                 locked_text = (
                     "⛔ **VIP Pass Expired**\n\n"
@@ -335,13 +426,12 @@ async def start_command(client, message):
                     "Click the button below to get your **24-Hour VIP Pass** and unlock unlimited ad-free downloads!"
                 )
                 
-                # Replace with your actual tutorial link later
                 TUTORIAL_LINK = "https://t.me/telegram" 
                 locked_buttons = InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔓 Verify & Unlock 24H Pass", url=short_link)],
                     [InlineKeyboardButton("❓ How to Open / Tutorial", url=TUTORIAL_LINK)]
                 ])
-                locked_image = "https://i.postimg.cc/mZh4Hpxb/ayaka.jpg" # Placeholder Locked Banner
+                locked_image = "https://i.postimg.cc/mZh4Hpxb/ayaka.jpg" 
                 
                 try:
                     await message.reply_photo(photo=locked_image, caption=locked_text, reply_markup=locked_buttons)
@@ -349,7 +439,6 @@ async def start_command(client, message):
                     await message.reply_text(locked_text, reply_markup=locked_buttons)
                 return
 
-            # Pass is Valid -> Fetch the File
             db_ids = arg.replace("dl_", "").split("-")
             status_msg = await message.reply_text("📥 **Fetching your Manga securely... Please wait.**")
             for db_msg_id in db_ids:
@@ -426,7 +515,7 @@ async def build_and_send_premium_post(title, tags, pages_count, cover_url, pdf_f
                 photo=cover_url if cover_url else START_IMAGE,
                 caption=post_caption,
                 reply_markup=post_buttons,
-                has_spoiler=True  # NAYA: Image par Spoiler blur effect lag jayega
+                has_spoiler=True  
             )
         except Exception as e:
             print(f"Post error in {target_chat}: {e}")
@@ -475,7 +564,6 @@ async def fetch_manga(client, message):
             eta_seconds = int(len(pages) * 0.8)
             await status_msg.edit_text(f"📥 **{manga['title']}**\n📄 Pages: {len(pages)} | ⏳ ETA: ~{eta_seconds}s")
             
-            # NAYA: Queue System - Sirf ek PDF ek time par process hogi (RAM Saver)
             async with download_lock:
                 pdf_files = download_and_make_pdf(pages, manga['title'])
                 
@@ -508,7 +596,6 @@ async def auto_post_task():
                             await save_to_db(f"LINK:{manga['link']}")
                             continue
                         
-                        # NAYA: Queue System for Autopost too
                         async with download_lock:
                             pdf_files = download_and_make_pdf(pages, manga['title'])
                             
