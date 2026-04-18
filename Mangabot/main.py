@@ -13,63 +13,50 @@ from pyrogram.errors import UserNotParticipant
 from flask import Flask
 
 # ==========================================
-# ⚙️ TOKEN MANAGER LOGIC (Integrated)
+# ⚙️ TOKEN MANAGER & URL SHORTENER
 # ==========================================
 DB_FILE = "user_data.json"
 SHORTENER_API_URL = os.environ.get("SHORTENER_API_URL", "https://linkshortify.com/api").strip()
 SHORTENER_API_KEY = os.environ.get("SHORTENER_API_KEY", "").strip()
 
 def load_data():
-    if not os.path.exists(DB_FILE):
-        return {}
+    if not os.path.exists(DB_FILE): return {}
     try:
-        with open(DB_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {}
+        with open(DB_FILE, "r") as f: return json.load(f)
+    except: return {}
 
 def save_data(data):
-    with open(DB_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+    with open(DB_FILE, "w") as f: json.dump(data, f, indent=4)
 
 def has_valid_pass(user_id):
     data = load_data()
     user_str = str(user_id)
     if user_str in data:
-        expiry = data[user_str].get("expiry", 0)
-        if time.time() < expiry:
-            return True
+        if time.time() < data[user_str].get("expiry", 0): return True
     return False
 
 def generate_token(user_id, pending_dl=None):
     data = load_data()
     user_str = str(user_id)
     token = "tok_" + "".join(random.choices(string.ascii_letters + string.digits, k=8))
-    
-    if user_str not in data:
-        data[user_str] = {}
-        
+    if user_str not in data: data[user_str] = {}
     data[user_str]["current_token"] = token
-    if pending_dl:
-        data[user_str]["pending_dl"] = pending_dl
-        
+    if pending_dl: data[user_str]["pending_dl"] = pending_dl
     save_data(data)
     return token
 
 def verify_token(user_id, token):
     data = load_data()
     user_str = str(user_id)
-    if user_str in data:
-        if data[user_str].get("current_token") == token:
-            data[user_str]["expiry"] = time.time() + 86400
-            data[user_str]["current_token"] = None 
-            pending_dl = data[user_str].get("pending_dl")
-            data[user_str]["pending_dl"] = None
-            save_data(data)
-            return True, pending_dl
+    if user_str in data and data[user_str].get("current_token") == token:
+        data[user_str]["expiry"] = time.time() + 86400
+        data[user_str]["current_token"] = None 
+        pending_dl = data[user_str].get("pending_dl")
+        data[user_str]["pending_dl"] = None
+        save_data(data)
+        return True, pending_dl
     return False, None
 
-# NAYA: Bulletproof API Logic (Crash fix)
 def get_short_link(long_url):
     if not SHORTENER_API_KEY or SHORTENER_API_KEY == "YOUR_API_KEY_HERE":
         print("⚠️ API Key missing! Returning direct Telegram link.")
@@ -77,20 +64,23 @@ def get_short_link(long_url):
         
     try:
         encoded_url = urllib.parse.quote(long_url)
-        api_call = f"{SHORTENER_API_URL}?api={SHORTENER_API_KEY}&url={encoded_url}"
+        
+        # NAYA JADOO: Agar Quick Link (/st) use kar rahe ho, toh request mat bhejo, direct link generate karo!
+        if "/st" in SHORTENER_API_URL:
+            quick_link = f"{SHORTENER_API_URL}?api={SHORTENER_API_KEY}&url={encoded_url}"
+            print("✅ Quick Link Detected! Direct link sent.")
+            return quick_link
+            
+        api_call = f"{SHORTENER_API_URL}?api={SHORTENER_API_KEY}&url={encoded_url}&format=text"
         response = requests.get(api_call)
         
+        if response.status_code == 200 and response.text.startswith("http"):
+            return response.text.strip()
+            
         try:
             data = response.json()
-            if data.get("status") == "success":
-                print("✅ Ad Link Generated Successfully!")
-                return data.get("shortenedUrl")
-        except Exception:
-            pass # Ignore JSON error and try text
-            
-        if response.status_code == 200 and response.text.startswith("http"):
-            print("✅ Ad Link Generated Successfully!")
-            return response.text.strip()
+            if data.get("status") == "success": return data.get("shortenedUrl")
+        except: pass
             
         print(f"❌ API Error: Invalid Response -> {response.text[:50]}")
         return long_url
@@ -145,11 +135,12 @@ scraped_history = set()
 USERS = set()
 ADMINS = set()
 AWAITING_IMAGE = set()
+DB_STATE_MSG_ID = None  # NAYA: For Cloud DB
 
 app = Client("manga_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # ==========================================
-# 2. UPGRADED DATABASE & LINKS CACHE
+# 2. UPGRADED DATABASE (PINNED CLOUD SAVE)
 # ==========================================
 async def update_dynamic_links():
     global BOT_USERNAME, FSUB_LINK
@@ -170,51 +161,74 @@ async def update_dynamic_links():
                 FSUB_LINK = f"https://t.me/{str(FSUB_CHANNEL).replace('@', '')}"
 
 async def load_database():
-    global START_IMAGE, FSUB_CHANNEL, AUTO_POST_CHANNEL
+    global START_IMAGE, FSUB_CHANNEL, AUTO_POST_CHANNEL, ADMINS, USERS, scraped_history, DB_STATE_MSG_ID
     print("📥 Loading Data from Database Channel...")
     if DATABASE_CHANNEL == 0 or DATABASE_CHANNEL == "0":
         print("⚠️ WARNING: DATABASE_CHANNEL ID is missing!")
         return
 
     try:
-        wake_msg = await app.send_message(DATABASE_CHANNEL, "🔄 Database Syncing...")
-        await asyncio.sleep(1)
-        await wake_msg.delete()
+        # NAYA: Pinned file se history read karo (Bypasses Telegram GetHistory Group Block)
+        chat = await app.get_chat(DATABASE_CHANNEL)
+        pinned = chat.pinned_message
+        
+        if pinned and pinned.document and pinned.document.file_name == "bot_db.json":
+            file_path = await app.download_media(pinned)
+            with open(file_path, "r") as f:
+                data = json.load(f)
+            
+            ADMINS = set(data.get("ADMINS", []))
+            USERS = set(data.get("USERS", []))
+            START_IMAGE = data.get("START_IMAGE")
+            FSUB_CHANNEL = data.get("FSUB_CHANNEL", "")
+            AUTO_POST_CHANNEL = data.get("AUTO_POST_CHANNEL", "")
+            scraped_history = set(data.get("scraped_history", []))
+            DB_STATE_MSG_ID = pinned.id
+            
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                
+            print(f"✅ Cloud DB Loaded: {len(scraped_history)} Manga | {len(USERS)} Users")
+        else:
+            print("⚠️ No pinned Cloud DB found. Starting fresh.")
     except Exception as e:
-        print(f"⚠️ Could not wake DB Channel (Make sure bot is admin): {e}")
+        print(f"⚠️ DB Load Error: {e}")
 
+async def save_to_db(data_string=None):
+    global DB_STATE_MSG_ID
+    if DATABASE_CHANNEL == 0 or DATABASE_CHANNEL == "0": return
+    
+    data = {
+        "ADMINS": list(ADMINS),
+        "USERS": list(USERS),
+        "START_IMAGE": START_IMAGE,
+        "FSUB_CHANNEL": FSUB_CHANNEL,
+        "AUTO_POST_CHANNEL": AUTO_POST_CHANNEL,
+        "scraped_history": list(scraped_history)
+    }
+    
     try:
-        async for msg in app.get_chat_history(DATABASE_CHANNEL):
-            text = msg.text or msg.caption
-            if text:
-                text = text.strip()
-                if text.startswith("ADMIN:"): ADMINS.add(int(text.split(":")[1]))
-                elif text.startswith("DELADMIN:"):
-                    aid = int(text.split(":")[1])
-                    if aid in ADMINS: ADMINS.remove(aid)
-                elif text.startswith("USER:"): USERS.add(int(text.split(":")[1]))
-                elif text.startswith("IMAGE:"):
-                    START_IMAGE = text.split(":", 1)[1]
-                    if START_IMAGE == "NONE": START_IMAGE = None
-                elif text.startswith("FSUB:"):
-                    FSUB_CHANNEL = text.split(":", 1)[1]
-                    if FSUB_CHANNEL == "NONE": FSUB_CHANNEL = ""
-                elif text.startswith("AUTOPOST:"):
-                    AUTO_POST_CHANNEL = text.split(":", 1)[1]
-                    if AUTO_POST_CHANNEL == "NONE": AUTO_POST_CHANNEL = ""
-                elif text.startswith("LINK:"): 
-                    scraped_history.add(text.split(":", 1)[1].strip())
-                elif text.startswith("http"): 
-                    scraped_history.add(text.strip())
-                    
-        print(f"✅ DB Loaded: {len(scraped_history)} Manga | {len(USERS)} Users")
+        file_name = "bot_db.json"
+        with open(file_name, "w") as f:
+            json.dump(data, f, indent=4)
+        
+        msg = await app.send_document(
+            DATABASE_CHANNEL, 
+            file_name, 
+            caption="🔄 Bot State Database\n*(Do not delete this message)*"
+        )
+        await msg.pin(disable_notification=True)
+        
+        if DB_STATE_MSG_ID:
+            try: await app.delete_messages(DATABASE_CHANNEL, DB_STATE_MSG_ID)
+            except: pass
+        
+        DB_STATE_MSG_ID = msg.id
+        
+        if os.path.exists(file_name):
+            os.remove(file_name)
     except Exception as e:
-        print(f"⚠️ Peer ID Invalid or DB Error: {e}")
-
-async def save_to_db(data_string):
-    if DATABASE_CHANNEL != 0 and DATABASE_CHANNEL != "0":
-        try: await app.send_message(DATABASE_CHANNEL, data_string)
-        except Exception: pass
+        print(f"DB Save Error: {e}")
 
 # ==========================================
 # 3. SECURITY: ADMIN & FSUB CHECKS
@@ -251,7 +265,7 @@ async def check_fsub_and_admin(client, message, strict_admin=True):
     
     if user_id not in USERS:
         USERS.add(user_id)
-        await save_to_db(f"USER:{user_id}")
+        await save_to_db()
         
     if strict_admin and not is_admin(user_id):
         await message.reply_text("⛔ **Access Denied:** Private Bot.")
@@ -290,7 +304,7 @@ async def cmd_setfsub(client, message):
     if len(args) < 2: return await message.reply_text("❌ **Format Error:** Use `/setfsub @YourChannel` or `/setfsub none`")
     val = args[1]
     FSUB_CHANNEL = "" if val.lower() == "none" else val
-    await save_to_db(f"FSUB:{'NONE' if val.lower() == 'none' else val}")
+    await save_to_db()
     await update_dynamic_links()
     await message.reply_text(f"✅ FSub updated.")
 
@@ -302,7 +316,7 @@ async def cmd_setautopost(client, message):
     if len(args) < 2: return await message.reply_text("❌ **Format Error:** Use `/setautopost @YourChannel` or `/setautopost none`")
     val = args[1]
     AUTO_POST_CHANNEL = "" if val.lower() == "none" else val
-    await save_to_db(f"AUTOPOST:{'NONE' if val.lower() == 'none' else val}")
+    await save_to_db()
     await message.reply_text(f"✅ Auto-post target updated.")
 
 @app.on_message(filters.command("setimage") & filters.private)
@@ -312,7 +326,7 @@ async def cmd_setimage(client, message):
     args = message.text.split()
     if len(args) == 2 and args[1].lower() == "none":
         START_IMAGE = None
-        await save_to_db("IMAGE:NONE")
+        await save_to_db()
         await message.reply_text("✅ Start Image removed.")
     elif len(args) == 1:
         AWAITING_IMAGE.add(message.from_user.id)
@@ -325,7 +339,7 @@ async def handle_photo(client, message):
     global START_IMAGE
     if message.from_user.id in AWAITING_IMAGE:
         START_IMAGE = message.photo.file_id
-        await save_to_db(f"IMAGE:{START_IMAGE}")
+        await save_to_db()
         AWAITING_IMAGE.remove(message.from_user.id)
         await message.reply_photo(photo=START_IMAGE, caption="✅ **Start Image Updated!**")
 
@@ -349,7 +363,7 @@ async def cmd_addadmin(client, message):
         new_admin = int(message.text.split()[1])
         if new_admin in ADMINS: return await message.reply_text("⚠️ Already an admin.")
         ADMINS.add(new_admin)
-        await save_to_db(f"ADMIN:{new_admin}")
+        await save_to_db()
         await message.reply_text(f"✅ User `{new_admin}` is now an Admin!")
     except Exception: await message.reply_text("❌ **Format Error:** `/addadmin [User_ID]`\n*(Use Number ID, not username)*")
 
@@ -360,7 +374,7 @@ async def cmd_deladmin(client, message):
         del_admin = int(message.text.split()[1])
         if del_admin in ADMINS:
             ADMINS.remove(del_admin)
-            await save_to_db(f"DELADMIN:{del_admin}")
+            await save_to_db()
             await message.reply_text(f"🗑️ Admin `{del_admin}` removed.")
     except Exception: await message.reply_text("❌ **Format Error:** `/deladmin [User_ID]`")
 
@@ -571,7 +585,7 @@ async def fetch_manga(client, message):
                 await build_and_send_premium_post(manga['title'], tags, len(pages), cover_url, pdf_files, dm_chat_id=message.chat.id, is_autopost=False)
                 
                 scraped_history.add(manga['link'])
-                await save_to_db(f"LINK:{manga['link']}") 
+                await save_to_db() 
         except Exception as e:
             print(f"Crash Guard Protected Bot: {e}")
             continue
@@ -593,7 +607,7 @@ async def auto_post_task():
                         pages, cover_url = get_manga_pages(manga['link'])
                         if not pages or len(pages) < 7:
                             scraped_history.add(manga['link'])
-                            await save_to_db(f"LINK:{manga['link']}")
+                            await save_to_db()
                             continue
                         
                         async with download_lock:
@@ -603,7 +617,7 @@ async def auto_post_task():
                             await build_and_send_premium_post(manga['title'], auto_post_tags, len(pages), cover_url, pdf_files, is_autopost=True)
                             
                             scraped_history.add(manga['link'])
-                            await save_to_db(f"LINK:{manga['link']}")
+                            await save_to_db()
                 except Exception as e:
                     print(f"Auto-post error skipped: {e}")
                     continue
