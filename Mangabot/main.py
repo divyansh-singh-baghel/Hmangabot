@@ -69,6 +69,7 @@ def verify_token(user_id, token):
             return True, pending_dl
     return False, None
 
+# NAYA: Bulletproof API Logic (Crash fix)
 def get_short_link(long_url):
     if not SHORTENER_API_KEY or SHORTENER_API_KEY == "YOUR_API_KEY_HERE":
         print("⚠️ API Key missing! Returning direct Telegram link.")
@@ -76,23 +77,22 @@ def get_short_link(long_url):
         
     try:
         encoded_url = urllib.parse.quote(long_url)
-        # FIX: Yahan &format=text add kar diya hai taaki JSON error na aaye!
-        api_call = f"{SHORTENER_API_URL}?api={SHORTENER_API_KEY}&url={encoded_url}&format=text"
+        api_call = f"{SHORTENER_API_URL}?api={SHORTENER_API_KEY}&url={encoded_url}"
         response = requests.get(api_call)
         
-        if response.status_code == 200 and response.text.startswith("http"):
-            print("✅ Ad Link Generated Successfully!")
-            return response.text.strip()
-            
         try:
             data = response.json()
             if data.get("status") == "success":
                 print("✅ Ad Link Generated Successfully!")
                 return data.get("shortenedUrl")
-        except:
-            pass
+        except Exception:
+            pass # Ignore JSON error and try text
             
-        print(f"❌ API Error: {response.text}")
+        if response.status_code == 200 and response.text.startswith("http"):
+            print("✅ Ad Link Generated Successfully!")
+            return response.text.strip()
+            
+        print(f"❌ API Error: Invalid Response -> {response.text[:50]}")
         return long_url
     except Exception as e:
         print(f"❌ API Request Failed: {e}")
